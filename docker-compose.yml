@@ -32,7 +32,11 @@ services:
     image: night-watch:latest
     restart: unless-stopped
     working_dir: /app/apps/web
-    command: ["bun", "run", ".output/server/index.mjs"]
+    # TanStack Start 1.170+ builds the SSR handler to `dist/server/server.js`
+    # (the older `.output/server/index.mjs` path is gone). The file exports
+    # `{ default: { fetch } }` — Bun's runtime auto-detects that shape and
+    # starts an HTTP server on $PORT.
+    command: ["bun", "run", "dist/server/server.js"]
     ports:
       - "${WEB_PORT:-3011}:3011"
     environment:
