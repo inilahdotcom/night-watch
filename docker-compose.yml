@@ -33,10 +33,9 @@ services:
     restart: unless-stopped
     working_dir: /app/apps/web
     # TanStack Start 1.170+ builds the SSR handler to `dist/server/server.js`
-    # (the older `.output/server/index.mjs` path is gone). The file exports
-    # `{ default: { fetch } }` — Bun's runtime auto-detects that shape and
-    # starts an HTTP server on $PORT.
-    command: ["bun", "run", "dist/server/server.js"]
+    # but doesn't serve its own static asset bundle (`dist/client/`). The
+    # small `server.ts` wrapper does both — statics first, SSR fallthrough.
+    command: ["bun", "run", "server.ts"]
     ports:
       - "${WEB_PORT:-3011}:3011"
     environment:
