@@ -42,7 +42,7 @@ docker compose up -d --build
 That starts three containers:
 
 - `migrate` runs the SQL migrations once and exits,
-- `web` serves the dashboard on http://localhost:3000,
+- `web` serves the dashboard on http://localhost:3011,
 - `worker` runs the collectors, analysis, and alert engine.
 
 Watch the logs:
@@ -94,7 +94,7 @@ bun run db:migrate
 
 ```bash
 bun run dev:web
-# opens on http://localhost:3000
+# opens on http://localhost:3011
 ```
 
 **Terminal B — worker (long-running):**
@@ -228,7 +228,7 @@ If the pairing ever gets revoked (`DisconnectReason.loggedOut`), the worker writ
 3. Restart web + worker.
 4. Open the dashboard. Click **Turn on** in the notifications panel. Your browser will ask for permission; grant it.
 
-Push requires HTTPS in production (localhost is exempt). If you're deploying behind Caddy / nginx / a Cloudflare tunnel, terminate TLS there and set the tunnel to forward to `web:3000`.
+Push requires HTTPS in production (localhost is exempt). If you're deploying behind Caddy / nginx / a Cloudflare tunnel, terminate TLS there and set the tunnel to forward to `web:3011`.
 
 ## How Night Watch decides something is anomalous
 
@@ -376,7 +376,7 @@ All variables are optional; the app is honest about what it can and can't do bas
 | `WA_AUTH_DIR` | `./apps/worker/auth_wa` | Where Baileys persists its pairing state. Docker default: `/data/auth_wa`. |
 | `ALERT_COOLDOWN_MINUTES` | 15 | Minimum minutes between re-notifications of the same firing critical. |
 | `ALERT_NOTIFY_ON_RESOLVE` | `true` | Send a recovery message when an alert clears. |
-| `WEB_PORT` | 3000 | Port the dashboard container binds to on the host. |
+| `WEB_PORT` | 3011 | Host port the dashboard container maps to (container listens on 3011 internally). |
 
 ## Licenses
 

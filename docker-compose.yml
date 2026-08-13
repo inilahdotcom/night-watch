@@ -1,7 +1,7 @@
 # Night Watch — production compose. Three services from one image:
 #
 #   migrate  runs once, applies pending SQL migrations to the shared DB
-#   web      the TanStack Start dashboard on :3000
+#   web      the TanStack Start dashboard on :3011
 #   worker   the long-lived scheduler that owns every DB write
 #
 # Both `web` and `worker` mount the same named volume for the SQLite file
@@ -34,9 +34,10 @@ services:
     working_dir: /app/apps/web
     command: ["bun", "run", ".output/server/index.mjs"]
     ports:
-      - "${WEB_PORT:-3000}:3000"
+      - "${WEB_PORT:-3011}:3011"
     environment:
       - NODE_ENV=production
+      - PORT=3011
       - DATABASE_URL=/data/night-watch.db
       - MONITORS_CONFIG_PATH=/config/monitors.json
       - LOG_LEVEL=info
@@ -50,7 +51,7 @@ services:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:3000/ >/dev/null || exit 1"]
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:3011/ >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       start_period: 20s
