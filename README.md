@@ -119,7 +119,7 @@ bun run typecheck       # all 3 workspaces
 
 ### 4. First-day check without waiting a week
 
-Seasonal baselines want at least a few days of history before the detector switches from the noisier 3-hour rolling fallback to the quieter seasonal path. To see the detectors in action *immediately*, synthetic data works:
+Seasonal baselines want at least a few days of history before the detector switches from the noisier 3-hour rolling fallback to the quieter seasonal path. To see the detectors in action _immediately_, synthetic data works:
 
 ```bash
 bun run db:seed     # writes ~108k rows of realistic 6-week metrics with planted anomalies
@@ -130,16 +130,16 @@ The seed uses a monitor called `seed-demo` — it doesn't overwrite your real mo
 
 ### Common tasks
 
-| I want to… | Command |
-| --- | --- |
-| Start the dashboard | `bun run dev:web` |
-| Start the worker | `bun run dev:worker` |
-| Force one collection cycle | `bun run db:collect` |
-| Fire a test alert | `bun run alert:test` |
-| Reseed synthetic data | `bun run db:seed && bun run db:demo` |
-| Reset the database | `rm -rf data/ && bun run db:migrate` |
-| Audit dependency licenses | `bun run audit:licenses` |
-| Rebuild the container image | `docker compose up -d --build` |
+| I want to…                  | Command                              |
+| --------------------------- | ------------------------------------ |
+| Start the dashboard         | `bun run dev:web`                    |
+| Start the worker            | `bun run dev:worker`                 |
+| Force one collection cycle  | `bun run db:collect`                 |
+| Fire a test alert           | `bun run alert:test`                 |
+| Reseed synthetic data       | `bun run db:seed && bun run db:demo` |
+| Reset the database          | `rm -rf data/ && bun run db:migrate` |
+| Audit dependency licenses   | `bun run audit:licenses`             |
+| Rebuild the container image | `docker compose up -d --build`       |
 
 ### Where `.env` is loaded from
 
@@ -153,21 +153,21 @@ Everything below the [Environment](#environment-reference) section works identic
 
 ```jsonc
 {
-  "controlUrl": "https://1.1.1.1",       // used to sanity-check outbound network when a probe fails
-  "alertCooldownMinutes": 15,             // critical alerts renotify at most every N minutes
-  "alertNotifyOnResolve": true,           // send a recovery message when an alert clears
-  "quietHours": "22:00-07:00",            // silence WhatsApp for non-critical alerts (WIB)
-  "timezone": "Asia/Jakarta",             // display timezone
+  "controlUrl": "https://1.1.1.1", // used to sanity-check outbound network when a probe fails
+  "alertCooldownMinutes": 15, // critical alerts renotify at most every N minutes
+  "alertNotifyOnResolve": true, // send a recovery message when an alert clears
+  "quietHours": "22:00-07:00", // silence WhatsApp for non-critical alerts (WIB)
+  "timezone": "Asia/Jakarta", // display timezone
   "monitors": [
     {
-      "id": "example",                    // stable id; used as fingerprint prefix
-      "url": "https://example.com",       // what the probe hits
-      "expectStatusBelow": 400,           // anything ≥ this counts as a probe failure
-      "expectText": "Example Domain",     // must appear in the body — catches "200 OK error page"
-      "cloudflareZoneId": "…",            // optional; without it, no CF metrics collected
-      "ga4PropertyId": "…"                // optional; without it, no GA4 metrics collected
-    }
-  ]
+      "id": "example", // stable id; used as fingerprint prefix
+      "url": "https://example.com", // what the probe hits
+      "expectStatusBelow": 400, // anything ≥ this counts as a probe failure
+      "expectText": "Example Domain", // must appear in the body — catches "200 OK error page"
+      "cloudflareZoneId": "…", // optional; without it, no CF metrics collected
+      "ga4PropertyId": "…", // optional; without it, no GA4 metrics collected
+    },
+  ],
 }
 ```
 
@@ -203,13 +203,33 @@ The Realtime API returns a snapshot (active users right now, page views in the l
 WhatsApp's official Cloud API cannot send to groups. Night Watch uses [`@whiskeysockets/baileys`](https://github.com/WhiskeySockets/Baileys), which talks the WhatsApp Web protocol directly.
 
 1. Create (or pick) a WhatsApp group. Send at least one message so it becomes discoverable.
-2. Get the group's JID. Easiest: run `bun run alert:test` locally with `WA_GROUP_JID` unset — the log line will list JIDs after pairing. Or use the Baileys `groupFetchAllParticipating` helper. JIDs look like `120363...@g.us`.
+2. Pair and get the group's JID:
+
+   ```bash
+   bun run wa:groups
+   ```
+
+   It prints a QR — scan it from the phone that owns the group (WhatsApp →
+   Linked Devices → Link a Device). Once paired it lists every group with its
+   JID and exits. JIDs look like `120363...@g.us`.
+
+   Credentials are written to `WA_AUTH_DIR`, the same folder the worker reads,
+   so you only scan once. Run it again any time to look up another JID — it
+   reuses the existing pairing instead of showing a new QR.
+
 3. Set in `.env`:
    ```
    WA_GROUP_JID=120363xxxxxxxxxxxx@g.us
    WA_AUTH_DIR=/data/auth_wa      # (Docker default; local dev defaults to ./apps/worker/auth_wa)
    ```
-4. Boot the worker. On first run it prints a QR — pair once from WhatsApp on the phone that owns the group (Linked Devices → Link a Device). Auth persists on disk.
+4. Boot the worker. If it finds credentials in `WA_AUTH_DIR` it connects
+   silently; otherwise it prints its own QR to pair. Auth persists on disk.
+
+**Local pairing does not carry over to Docker.** `bun run wa:groups` writes to
+`./apps/worker/auth_wa`, while the compose worker uses `/data/auth_wa` on the
+`db-data` volume. Either copy the folder into the volume, or just let the
+container pair itself — it has `tty: true`, so the QR renders in
+`docker compose logs -f worker`.
 
 If the pairing ever gets revoked (`DisconnectReason.loggedOut`), the worker writes `wa:needs-relink` into `system_state` and the dashboard shows a banner. Restart the worker after clearing the auth folder to re-pair.
 
@@ -230,13 +250,43 @@ If the pairing ever gets revoked (`DisconnectReason.loggedOut`), the worker writ
 
 Push requires HTTPS in production (localhost is exempt). If you're deploying behind Caddy / nginx / a Cloudflare tunnel, terminate TLS there and set the tunnel to forward to `web:3011`.
 
+## Snooze & maintenance windows
+
+Two ways to tell Night Watch to stop notifying for a while, so a deploy or planned outage doesn't wake you up.
+
+### Ad-hoc snooze (dashboard button)
+
+Every dashboard has a **Snooze & maintenance** panel between "Browser notifications" and "Currently firing". Pick a scope (**All monitors** or one specific monitor), optionally type a reason ("deploy"), then click **Snooze 15m / 1h / 4h**. The command flows through the outbox and takes effect in ~2 seconds. Click **Clear** on the active row to end early.
+
+Behaviour while a snooze is active:
+
+- Alerts still get evaluated and their rows still get inserted (they show up in "Currently firing" so you can see what happened).
+- Push and WhatsApp deliveries are recorded as `skipped` with detail `maintenance: …`.
+- Resolves always break through — you'll still get "traffic recovered" when the alert clears.
+
+### Recurring maintenance windows (config)
+
+For scheduled maintenance ("every Sunday 02:00-04:00 we run backups and the origin blips"), add a `maintenanceWindows` array to the monitor:
+
+```jsonc
+{
+  "id": "shop",
+  "url": "https://shop.example",
+  "maintenanceWindows": [
+    { "start": "02:00", "end": "04:00", "daysOfWeek": [0] } // Sundays only
+  ]
+}
+```
+
+`start`/`end` are local wall-clock (`HH:MM`), respecting the config's `timezone`. Set `start > end` for overnight windows (e.g. `"22:00"–"02:00"`). Omit `daysOfWeek` to apply every day; `0 = Sunday … 6 = Saturday`. Restart the worker after editing.
+
 ## How Night Watch decides something is anomalous
 
 The hard part of an alerting system isn't detecting problems — it's **not waking someone at 3am for a false alarm**. Here's the actual logic, in the order the worker applies it.
 
 ### 1. Seasonal baseline, not a static threshold
 
-A static threshold like "alert if requests < 1000" fails at 03:00 because 03:00 is *legitimately* quiet. Instead:
+A static threshold like "alert if requests < 1000" fails at 03:00 because 03:00 is _legitimately_ quiet. Instead:
 
 - Time is bucketed into 5-minute windows (`bucketSeconds`).
 - For the bucket at time T, the baseline is drawn from **the same time-of-day, one to four weeks ago** — with a ±1-bucket tolerance for slightly misaligned ingestion. Tuesday 14:00 gets compared to Tuesday 14:00 of previous weeks.
@@ -244,7 +294,7 @@ A static threshold like "alert if requests < 1000" fails at 03:00 because 03:00 
 
 ### 2. Robust statistics (median + MAD), not mean + stddev
 
-If last week had an incident, a mean-based baseline is contaminated and the threshold quietly stretches — so *this* week's incident slips through undetected. Median and MAD (median absolute deviation) don't budge on a few outliers.
+If last week had an incident, a mean-based baseline is contaminated and the threshold quietly stretches — so _this_ week's incident slips through undetected. Median and MAD (median absolute deviation) don't budge on a few outliers.
 
 The z-score used is `0.6745 × (value − median) / MAD` — the 0.6745 makes the units comparable to normal-distribution sigmas.
 
@@ -267,26 +317,26 @@ Even after the three guards pass, the anomaly has to repeat for `consecutiveBuck
 
 ### 5. Uptime hysteresis
 
-The probe fires every `probeIntervalSeconds` (default 60). A failure means: timeout, status ≥ `expectStatusBelow`, or `expectText` missing from the body. That last check catches the case where an origin returns a generic error page with status 200 — the response *is* HTTP-successful but the site is *effectively* broken.
+The probe fires every `probeIntervalSeconds` (default 60). A failure means: timeout, status ≥ `expectStatusBelow`, or `expectText` missing from the body. That last check catches the case where an origin returns a generic error page with status 200 — the response _is_ HTTP-successful but the site is _effectively_ broken.
 
 - `failThreshold` (default 3) consecutive failures before the state flips to DOWN.
 - `recoverThreshold` (default 2) consecutive successes before it flips back.
-- **Control-URL sanity check**: if a probe fails, the worker first pings `controlUrl` (e.g. `https://1.1.1.1`). If *that* also fails, the monitor host itself is offline — the failure is discarded and no alert fires. Without this, one bad monitor-host network hiccup would fire "everything is down" for every site.
+- **Control-URL sanity check**: if a probe fails, the worker first pings `controlUrl` (e.g. `https://1.1.1.1`). If _that_ also fails, the monitor host itself is offline — the failure is discarded and no alert fires. Without this, one bad monitor-host network hiccup would fire "everything is down" for every site.
 - **Slow-response warning**: latency ≥ `slowResponseMs` (default 3000) fires as a separate `warning`, often an early sign of impending downtime.
 
 ### 6. DDoS score (composite, not a single metric)
 
 No single Cloudflare signal is definitive — volume spikes could be marketing wins; firewall activity could be a bot sweep. Night Watch adds weights per bucket:
 
-| Signal | Weight |
-| --- | ---: |
-| Volume spike `z ≥ spikeZ` | 2 |
-| Volume spike `z ≥ 2 × spikeZ` (extreme) | 3 |
-| Firewall blocking / challenging ≥ `threatRatioCrit` (35%) of requests | 3 |
-| Firewall mitigating ≥ `threatRatioWarn` (15%) of requests | 2 |
-| Origin returning ≥ `errorRatio` (10%) 5xx | 2 |
-| Cache miss ≥ 70% **AND** volume spike (cache-busting signature) | 2 |
-| ≥ 5% of requests rate-limited (429) | 1 |
+| Signal                                                                | Weight |
+| --------------------------------------------------------------------- | -----: |
+| Volume spike `z ≥ spikeZ`                                             |      2 |
+| Volume spike `z ≥ 2 × spikeZ` (extreme)                               |      3 |
+| Firewall blocking / challenging ≥ `threatRatioCrit` (35%) of requests |      3 |
+| Firewall mitigating ≥ `threatRatioWarn` (15%) of requests             |      2 |
+| Origin returning ≥ `errorRatio` (10%) 5xx                             |      2 |
+| Cache miss ≥ 70% **AND** volume spike (cache-busting signature)       |      2 |
+| ≥ 5% of requests rate-limited (429)                                   |      1 |
 
 `score ≥ 3` → **warning**. `score ≥ 5` → **critical**. Below `minRequests` (default 300) the whole scorer is silent — you can't have a meaningful DDoS below 1 rps.
 
@@ -312,34 +362,34 @@ Recovery from a DDoS alert requires **3 consecutive clean buckets** before the a
 
 Every per-monitor detector setting has a sensible default. Override any of them in `config/monitors.json`:
 
-| Field | Default | What it does | Change when… |
-| --- | --- | --- | --- |
-| `bucketSeconds` | 300 | Time bucket size | Almost never — 5 min matches Cloudflare's native bucket. |
-| `baselineWeeks` | 4 | How many prior weeks to compare against | Increase for very seasonal sites; decrease for young sites. |
-| `minSamples` | 6 | Below this, fall back to rolling window | Lower to bring seasonal in earlier; raise to be strict. |
-| `spikeZ` | 3.5 | z-score threshold for a "real" deviation | Lower ⇒ more alerts; raise ⇒ fewer. |
-| `minBaseline` | 50 | Median must exceed this for traffic alerts to fire | Raise for high-traffic sites so tiny quiet-time swings stop mattering. |
-| `minRelativeChange` | 0.4 | Relative change must exceed this | Raise to filter out modest swings; lower to catch subtle drifts. |
-| `consecutiveBuckets` | 2 | How many buckets a deviation must persist | Raise to reduce noise (at the cost of slower alerts). |
-| `minRequests` | 300 | Below this, DDoS scorer stays silent | Raise for high-volume zones; low sites rarely see meaningful DDoS. |
-| `ingestLagSeconds` | 240 | Back off this much + one bucket before analyzing | Raise if your CF plan has slow ingestion; never lower it. |
-| `threatRatioCrit` | 0.35 | Firewall block/challenge ratio ⇒ crit weight | Adjust to your baseline threat rate. |
-| `threatRatioWarn` | 0.15 | Firewall mitigate ratio ⇒ warn weight | Same as above. |
-| `errorRatio` | 0.10 | Origin 5xx ratio ⇒ DDoS signal | Raise if your baseline 5xx is unusually high. |
-| `failThreshold` | 3 | Probes-in-a-row before DOWN | Lower for critical sites; raise for flaky origins you tolerate. |
-| `recoverThreshold` | 2 | Probes-in-a-row before back UP | Raise to avoid flapping. |
-| `slowResponseMs` | 3000 | Latency threshold for slow warning | Match your SLA target. |
-| `probeTimeoutMs` | 10000 | HTTP fetch timeout | Raise for slow APIs you monitor. |
+| Field                | Default | What it does                                       | Change when…                                                           |
+| -------------------- | ------- | -------------------------------------------------- | ---------------------------------------------------------------------- |
+| `bucketSeconds`      | 300     | Time bucket size                                   | Almost never — 5 min matches Cloudflare's native bucket.               |
+| `baselineWeeks`      | 4       | How many prior weeks to compare against            | Increase for very seasonal sites; decrease for young sites.            |
+| `minSamples`         | 6       | Below this, fall back to rolling window            | Lower to bring seasonal in earlier; raise to be strict.                |
+| `spikeZ`             | 3.5     | z-score threshold for a "real" deviation           | Lower ⇒ more alerts; raise ⇒ fewer.                                    |
+| `minBaseline`        | 50      | Median must exceed this for traffic alerts to fire | Raise for high-traffic sites so tiny quiet-time swings stop mattering. |
+| `minRelativeChange`  | 0.4     | Relative change must exceed this                   | Raise to filter out modest swings; lower to catch subtle drifts.       |
+| `consecutiveBuckets` | 2       | How many buckets a deviation must persist          | Raise to reduce noise (at the cost of slower alerts).                  |
+| `minRequests`        | 300     | Below this, DDoS scorer stays silent               | Raise for high-volume zones; low sites rarely see meaningful DDoS.     |
+| `ingestLagSeconds`   | 240     | Back off this much + one bucket before analyzing   | Raise if your CF plan has slow ingestion; never lower it.              |
+| `threatRatioCrit`    | 0.35    | Firewall block/challenge ratio ⇒ crit weight       | Adjust to your baseline threat rate.                                   |
+| `threatRatioWarn`    | 0.15    | Firewall mitigate ratio ⇒ warn weight              | Same as above.                                                         |
+| `errorRatio`         | 0.10    | Origin 5xx ratio ⇒ DDoS signal                     | Raise if your baseline 5xx is unusually high.                          |
+| `failThreshold`      | 3       | Probes-in-a-row before DOWN                        | Lower for critical sites; raise for flaky origins you tolerate.        |
+| `recoverThreshold`   | 2       | Probes-in-a-row before back UP                     | Raise to avoid flapping.                                               |
+| `slowResponseMs`     | 3000    | Latency threshold for slow warning                 | Match your SLA target.                                                 |
+| `probeTimeoutMs`     | 10000   | HTTP fetch timeout                                 | Raise for slow APIs you monitor.                                       |
 
 Global settings (top-level in `monitors.json`, not per-monitor):
 
-| Field | Default | Purpose |
-| --- | --- | --- |
-| `controlUrl` | `https://1.1.1.1` | Reachability probe from the monitor host itself. |
-| `alertCooldownMinutes` | 15 | Minimum minutes between re-notifications of the same firing critical. |
-| `alertNotifyOnResolve` | `true` | Whether to send a recovery message when an alert clears. |
-| `quietHours` | `null` | WhatsApp mute window for non-critical alerts (e.g. `"22:00-07:00"`). Critical always breaks through. |
-| `timezone` | `Asia/Jakarta` | Display timezone (WIB) — used for WhatsApp timestamps and quiet-hours math. |
+| Field                  | Default           | Purpose                                                                                              |
+| ---------------------- | ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `controlUrl`           | `https://1.1.1.1` | Reachability probe from the monitor host itself.                                                     |
+| `alertCooldownMinutes` | 15                | Minimum minutes between re-notifications of the same firing critical.                                |
+| `alertNotifyOnResolve` | `true`            | Whether to send a recovery message when an alert clears.                                             |
+| `quietHours`           | `null`            | WhatsApp mute window for non-critical alerts (e.g. `"22:00-07:00"`). Critical always breaks through. |
+| `timezone`             | `Asia/Jakarta`    | Display timezone (WIB) — used for WhatsApp timestamps and quiet-hours math.                          |
 
 ## Trying the detectors against synthetic data
 
@@ -362,21 +412,21 @@ It exits non-zero on any false positive/negative. Use it as a smoke test after t
 
 All variables are optional; the app is honest about what it can and can't do based on what's set.
 
-| Var | Default | Purpose |
-| --- | --- | --- |
-| `NODE_ENV` | `development` | `production` disables the pretty-log transport. |
-| `LOG_LEVEL` | `info` | pino level (`fatal`/`error`/`warn`/`info`/`debug`/`trace`). |
-| `DATABASE_URL` | `./data/night-watch.db` | SQLite path. Absolute paths honoured; relative anchor to workspace root. |
-| `MONITORS_CONFIG_PATH` | `./config/monitors.json` | Path to the monitors config that zod validates at boot. |
-| `CLOUDFLARE_API_TOKEN` | (unset) | CF API token with Zone Analytics Read. Required when a monitor has `cloudflareZoneId`. |
-| `GA4_SERVICE_ACCOUNT_KEY_PATH` | (unset) | Path to GA4 service-account JSON. Required when a monitor has `ga4PropertyId`. |
-| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | (unset) | Generate with `bunx web-push generate-vapid-keys --json`. Both required for push. |
-| `VAPID_SUBJECT` | `mailto:admin@example.com` | Contact URL/email required by the Web Push spec. |
-| `WA_GROUP_JID` | (unset) | WhatsApp group JID (`120…@g.us`). Required for WhatsApp channel. |
-| `WA_AUTH_DIR` | `./apps/worker/auth_wa` | Where Baileys persists its pairing state. Docker default: `/data/auth_wa`. |
-| `ALERT_COOLDOWN_MINUTES` | 15 | Minimum minutes between re-notifications of the same firing critical. |
-| `ALERT_NOTIFY_ON_RESOLVE` | `true` | Send a recovery message when an alert clears. |
-| `WEB_PORT` | 3011 | Host port the dashboard container maps to (container listens on 3011 internally). |
+| Var                                     | Default                    | Purpose                                                                                |
+| --------------------------------------- | -------------------------- | -------------------------------------------------------------------------------------- |
+| `NODE_ENV`                              | `development`              | `production` disables the pretty-log transport.                                        |
+| `LOG_LEVEL`                             | `info`                     | pino level (`fatal`/`error`/`warn`/`info`/`debug`/`trace`).                            |
+| `DATABASE_URL`                          | `./data/night-watch.db`    | SQLite path. Absolute paths honoured; relative anchor to workspace root.               |
+| `MONITORS_CONFIG_PATH`                  | `./config/monitors.json`   | Path to the monitors config that zod validates at boot.                                |
+| `CLOUDFLARE_API_TOKEN`                  | (unset)                    | CF API token with Zone Analytics Read. Required when a monitor has `cloudflareZoneId`. |
+| `GA4_SERVICE_ACCOUNT_KEY_PATH`          | (unset)                    | Path to GA4 service-account JSON. Required when a monitor has `ga4PropertyId`.         |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | (unset)                    | Generate with `bunx web-push generate-vapid-keys --json`. Both required for push.      |
+| `VAPID_SUBJECT`                         | `mailto:admin@example.com` | Contact URL/email required by the Web Push spec.                                       |
+| `WA_GROUP_JID`                          | (unset)                    | WhatsApp group JID (`120…@g.us`). Required for WhatsApp channel.                       |
+| `WA_AUTH_DIR`                           | `./apps/worker/auth_wa`    | Where Baileys persists its pairing state. Docker default: `/data/auth_wa`.             |
+| `ALERT_COOLDOWN_MINUTES`                | 15                         | Minimum minutes between re-notifications of the same firing critical.                  |
+| `ALERT_NOTIFY_ON_RESOLVE`               | `true`                     | Send a recovery message when an alert clears.                                          |
+| `WEB_PORT`                              | 3011                       | Host port the dashboard container maps to (container listens on 3011 internally).      |
 
 ## Licenses
 
@@ -389,22 +439,22 @@ bun run audit:licenses:md      # markdown table for the README
 
 Aggregate breakdown from the last audit:
 
-| License | Count | Category | Notable packages |
-| --- | ---: | --- | --- |
-| MIT | 590 | OK | @tanstack/react-*, drizzle-orm, pino, vite, zod, react, tailwindcss |
-| Apache-2.0 | 37 | OK | @google-analytics/data, @whiskeysockets/baileys, qrcode-terminal, typescript |
-| ISC | 30 | OK | electron-to-chromium, glob, npmlog, semver |
-| BSD-3-Clause | 25 | OK | @dotenvx/*, @hapi/*, esrecurse |
-| BSD-2-Clause | 12 | OK | dotenv, entities, eslint-scope, espree |
-| MPL-2.0 | 3 | OK | lightningcss, lightningcss-darwin-x64, web-push |
-| MIT-0 | 2 | OK | @csstools/color-helpers, @csstools/css-syntax-patches-for-csstree |
-| OFL-1.1 | 2 | FONT | @fontsource-variable/geist, @fontsource-variable/geist-mono |
-| CC0-1.0 | 1 | DATA | mdn-data |
-| Unlicense | 1 | DATA | isbot |
-| CC-BY-4.0 | 1 | ATTRIB | caniuse-lite (attribution satisfied by inclusion in this table) |
-| LGPL-3.0-or-later | 1 | WEAK_COPY | @img/sharp-libvips-darwin-x64 (dynamically linked; self-hosted, not redistributed) |
-| GPL-3.0 | 1 | STRONG_COPY | libsignal (transitive of Baileys; not modified, not redistributed) |
-| 0BSD, Python-2.0, BlueOak-1.0.0, (MIT OR WTFPL), (BSD-2 OR MIT OR Apache-2.0) | 5 | OK | tslib, argparse, isexe, expand-template, rc |
+| License                                                                       | Count | Category    | Notable packages                                                                   |
+| ----------------------------------------------------------------------------- | ----: | ----------- | ---------------------------------------------------------------------------------- |
+| MIT                                                                           |   590 | OK          | @tanstack/react-*, drizzle-orm, pino, vite, zod, react, tailwindcss                |
+| Apache-2.0                                                                    |    37 | OK          | @google-analytics/data, @whiskeysockets/baileys, qrcode-terminal, typescript       |
+| ISC                                                                           |    30 | OK          | electron-to-chromium, glob, npmlog, semver                                         |
+| BSD-3-Clause                                                                  |    25 | OK          | @dotenvx/_, @hapi/_, esrecurse                                                     |
+| BSD-2-Clause                                                                  |    12 | OK          | dotenv, entities, eslint-scope, espree                                             |
+| MPL-2.0                                                                       |     3 | OK          | lightningcss, lightningcss-darwin-x64, web-push                                    |
+| MIT-0                                                                         |     2 | OK          | @csstools/color-helpers, @csstools/css-syntax-patches-for-csstree                  |
+| OFL-1.1                                                                       |     2 | FONT        | @fontsource-variable/geist, @fontsource-variable/geist-mono                        |
+| CC0-1.0                                                                       |     1 | DATA        | mdn-data                                                                           |
+| Unlicense                                                                     |     1 | DATA        | isbot                                                                              |
+| CC-BY-4.0                                                                     |     1 | ATTRIB      | caniuse-lite (attribution satisfied by inclusion in this table)                    |
+| LGPL-3.0-or-later                                                             |     1 | WEAK_COPY   | @img/sharp-libvips-darwin-x64 (dynamically linked; self-hosted, not redistributed) |
+| GPL-3.0                                                                       |     1 | STRONG_COPY | libsignal (transitive of Baileys; not modified, not redistributed)                 |
+| 0BSD, Python-2.0, BlueOak-1.0.0, (MIT OR WTFPL), (BSD-2 OR MIT OR Apache-2.0) |     5 | OK          | tslib, argparse, isexe, expand-template, rc                                        |
 
 **Notes:**
 

@@ -5,6 +5,7 @@ import {
   fetchActiveAlerts,
   fetchAlertHistory,
   fetchMonitors,
+  fetchSnoozes,
   fetchStatus,
   fetchSystemHealth,
 } from "../lib/server-fns";
@@ -13,6 +14,7 @@ import { ActiveAlerts } from "../components/alerts-list";
 import { History } from "../components/history";
 import { MonitorCard } from "../components/monitor-card";
 import { SubscribeButton } from "../components/subscribe-button";
+import { SnoozeControls } from "../components/snooze-controls";
 
 export const Route = createFileRoute("/")({ component: DashboardPage });
 
@@ -54,6 +56,7 @@ function DashboardBody() {
   });
   const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => fetchMonitors() });
   const system = useQuery({ queryKey: ["system"], queryFn: () => fetchSystemHealth() });
+  const snoozes = useQuery({ queryKey: ["snoozes"], queryFn: () => fetchSnoozes() });
 
   return (
     <main className="mx-auto min-h-svh max-w-3xl px-5 pb-24 sm:px-8">
@@ -72,6 +75,8 @@ function DashboardBody() {
       )}
 
       <SubscribeButton system={system.data} />
+
+      <SnoozeControls snoozes={snoozes.data} monitors={monitors.data} />
 
       <ActiveAlerts alerts={active.data} />
 

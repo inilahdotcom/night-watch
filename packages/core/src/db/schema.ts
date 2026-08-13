@@ -43,7 +43,7 @@ export type AlertType = "traffic" | "uptime" | "ddos" | "latency";
 export type Channel = "push" | "whatsapp";
 export type DeliveryStatus = "sent" | "failed" | "skipped";
 export type CommandStatus = "pending" | "done" | "failed";
-export type CommandKind = "test_alert" | "wa_relink";
+export type CommandKind = "test_alert" | "wa_relink" | "snooze" | "unsnooze";
 
 // Time-series metrics. The composite PK + WITHOUT ROWID (declared in the initial
 // migration) is what makes upserts idempotent and storage compact.

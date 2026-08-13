@@ -81,6 +81,10 @@ function engineWith(
     cooldownMinutes?: number;
     notifyOnResolve?: boolean;
     quietHours?: string | null;
+    getMaintenanceStatus?: (
+      monitorId: string,
+      nowSeconds: number,
+    ) => { suppressed: boolean; reason?: string };
   },
 ) {
   const { sqlite, db } = newDb();
@@ -94,6 +98,7 @@ function engineWith(
     utcOffsetHours: 7,
     timezoneLabel: "WIB",
     now: fakeNow,
+    getMaintenanceStatus: overrides?.getMaintenanceStatus,
   });
   return { engine, sqlite, db };
 }
@@ -286,6 +291,64 @@ describe("engine — quiet hours behaviour", () => {
     await engine.raiseAlert({ ...BASE_INPUT, severity: "critical" });
     expect(push.sends).toHaveLength(1);
     expect(wa.sends).toHaveLength(1);
+  });
+});
+
+describe("engine — maintenance / snooze suppression", () => {
+  it("firing alert is inserted but every channel is recorded as skipped", async () => {
+    const push = new MemoryChannel();
+    const wa = new MemoryWhatsApp();
+    const { engine, sqlite } = engineWith([push, wa], {
+      getMaintenanceStatus: () => ({ suppressed: true, reason: "deploy" }),
+    });
+    const r = await engine.raiseAlert(BASE_INPUT);
+    expect(r.action).toBe("created");
+    expect(push.sends).toHaveLength(0);
+    expect(wa.sends).toHaveLength(0);
+
+    // Alert row IS stored (dashboard visibility preserved).
+    const alertRow = sqlite
+      .prepare("SELECT status FROM alerts WHERE id = ?")
+      .get(r.alertId) as { status: string };
+    expect(alertRow.status).toBe("firing");
+
+    // Deliveries recorded as skipped with maintenance detail.
+    const rows = sqlite
+      .prepare(
+        "SELECT channel, status, detail FROM deliveries WHERE alert_id = ?",
+      )
+      .all(r.alertId) as Array<{ channel: string; status: string; detail: string }>;
+    expect(rows).toHaveLength(2);
+    for (const d of rows) {
+      expect(d.status).toBe("skipped");
+      expect(d.detail).toMatch(/maintenance/);
+    }
+  });
+
+  it("resolve breaks through active suppression", async () => {
+    const push = new MemoryChannel();
+    let suppress = false;
+    const { engine } = engineWith([push], {
+      getMaintenanceStatus: () => ({ suppressed: suppress }),
+    });
+    // Raise while NOT suppressed so we have a live firing row.
+    await engine.raiseAlert(BASE_INPUT);
+    expect(push.sends).toHaveLength(1);
+
+    // Snooze kicks in, then the alert resolves.
+    suppress = true;
+    clockOffset += 300;
+    const r = await engine.resolveAlert({ fingerprint: BASE_INPUT.fingerprint });
+    expect(r.action).toBe("resolved");
+    expect(push.sends).toHaveLength(2);
+    expect(push.sends[1]!.status).toBe("resolved");
+  });
+
+  it("no getMaintenanceStatus callback keeps original behaviour", async () => {
+    const push = new MemoryChannel();
+    const { engine } = engineWith([push]); // no override
+    await engine.raiseAlert(BASE_INPUT);
+    expect(push.sends).toHaveLength(1);
   });
 });
 

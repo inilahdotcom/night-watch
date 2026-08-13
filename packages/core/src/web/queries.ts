@@ -1,7 +1,13 @@
 import { and, desc, eq, gte, sql } from "drizzle-orm";
+import type { Database } from "bun:sqlite";
 import type { DB } from "../db/client.ts";
 import { alerts, metrics, probeState, systemState } from "../db/schema.ts";
 import type { MetricName, MetricSource } from "../db/schema.ts";
+import {
+  readActiveSnoozes,
+  type AdhocSnooze,
+  type MaintenanceWindow,
+} from "../alerts/maintenance.ts";
 
 // Read helpers used by the web app's server functions. The engine/collectors
 // live in packages/core so we can share the same types; the *web* consumers
@@ -64,6 +70,12 @@ export interface SystemHealthView {
   vapidPublicKey: string | null;
   quietHours: string | null;
   timezone: string;
+}
+
+export interface SnoozesView {
+  adhoc: AdhocSnooze[];
+  recurring: Array<{ monitor: string; windows: MaintenanceWindow[] }>;
+  updatedAt: number;
 }
 
 // --------------------------------------------------------------------------
@@ -241,6 +253,23 @@ export function getWhatsAppQr(db: DB): string | null {
   if (!row || row.value === null) return null;
   const v = row.value as { qr?: string };
   return v.qr ?? null;
+}
+
+/**
+ * Active snooze state — ad-hoc (from system_state) + recurring windows (from
+ * monitors.json passed in). Both go into the same view so the dashboard
+ * renders a single "Snooze" panel.
+ */
+export function getActiveSnoozes(
+  sqlite: Database,
+  monitors: readonly { id: string; maintenanceWindows: MaintenanceWindow[] }[],
+): SnoozesView {
+  const now = Math.floor(Date.now() / 1000);
+  const adhoc = readActiveSnoozes(sqlite, now);
+  const recurring = monitors
+    .filter((m) => m.maintenanceWindows.length > 0)
+    .map((m) => ({ monitor: m.id, windows: m.maintenanceWindows }));
+  return { adhoc, recurring, updatedAt: now };
 }
 
 /** For dashboard "N alerts in last 24h" — cheap count. */

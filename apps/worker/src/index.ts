@@ -4,8 +4,10 @@ import {
   createAlertEngine,
   createPushChannel,
   createWhatsAppChannel,
+  isSnoozedNow,
   parseQuietHours,
   pollAndExecute,
+  readActiveSnoozes,
   type NotificationChannel,
   type WhatsAppAdapter,
 } from "@night-watch/core/alerts";
@@ -103,6 +105,11 @@ async function main(): Promise<void> {
     log.warn("no channels configured — alerts will still be recorded in the DB");
   }
 
+  // Fast lookup of per-monitor recurring maintenance windows.
+  const monitorWindows = new Map(
+    config.monitors.map((m) => [m.id, m.maintenanceWindows ?? []]),
+  );
+
   const engine = createAlertEngine({
     db,
     sqlite,
@@ -112,10 +119,16 @@ async function main(): Promise<void> {
     quietHours: parseQuietHours(config.quietHours),
     utcOffsetHours: 7,
     timezoneLabel: "WIB",
+    getMaintenanceStatus(monitorId, nowSeconds) {
+      const adhoc = readActiveSnoozes(sqlite, nowSeconds);
+      const windows = monitorWindows.get(monitorId) ?? [];
+      return isSnoozedNow(monitorId, nowSeconds, adhoc, windows, 7);
+    },
   });
 
   const handlers = buildDefaultHandlers({
     engine,
+    sqlite,
     async clearWhatsAppAuth() {
       log.warn("wa_relink: removing auth folder — next boot will show QR");
       await rm(env.WA_AUTH_DIR, { recursive: true, force: true });
@@ -256,8 +269,11 @@ async function showQr(qr: string): Promise<void> {
       default?: { generate: (text: string, opts?: { small: boolean }) => void };
       generate?: (text: string, opts?: { small: boolean }) => void;
     };
-    const generate = mod.default?.generate ?? mod.generate;
-    if (generate) generate(qr, { small: true });
+    // Call through the owning object: qrcode-terminal's `generate` reads
+    // `this.error` for the correction level, so a detached reference throws
+    // ("bad rs block @ errorCorrectLevel:undefined") and the QR never renders.
+    const host = mod.default?.generate ? mod.default : mod.generate ? mod : null;
+    if (host) host.generate!(qr, { small: true });
     else console.log("QR:", qr);
   } catch {
     console.log("QR:", qr);

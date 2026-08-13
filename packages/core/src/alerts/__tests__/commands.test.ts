@@ -27,6 +27,8 @@ function stubHandlers(overrides?: Partial<CommandHandlers>): CommandHandlers {
   return {
     test_alert: mock(async () => {}),
     wa_relink: mock(async () => {}),
+    snooze: mock(async () => {}),
+    unsnooze: mock(async () => {}),
     ...overrides,
   };
 }
@@ -113,5 +115,18 @@ describe("pollAndExecute", () => {
     await pollAndExecute({ sqlite, handlers });
     expect(handlers.wa_relink).toHaveBeenCalledTimes(1);
     expect(handlers.test_alert).not.toHaveBeenCalled();
+  });
+
+  it("routes snooze / unsnooze with parsed payloads", async () => {
+    const sqlite = newDb();
+    const handlers = stubHandlers();
+    enqueueCommand(sqlite, "snooze", { scope: "global", durationMinutes: 15 });
+    enqueueCommand(sqlite, "unsnooze", { scope: "global" });
+    await pollAndExecute({ sqlite, handlers });
+    expect(handlers.snooze).toHaveBeenCalledWith({
+      scope: "global",
+      durationMinutes: 15,
+    });
+    expect(handlers.unsnooze).toHaveBeenCalledWith({ scope: "global" });
   });
 });
