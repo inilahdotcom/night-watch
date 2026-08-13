@@ -1,0 +1,18 @@
+{
+  "controlUrl": "https://1.1.1.1",
+  "alertCooldownMinutes": 15,
+  "alertNotifyOnResolve": true,
+  "quietHours": "22:00-07:00",
+  "timezone": "Asia/Jakarta",
+  "monitors": [
+    {
+      "id": "example",
+      "url": "https://example.com",
+      "label": "Example site",
+      "expectStatusBelow": 400,
+      "expectText": "Example Domain",
+      "cloudflareZoneId": "REPLACE_WITH_ZONE_ID",
+      "ga4PropertyId": "REPLACE_WITH_PROPERTY_ID"
+    }
+  ]
+}

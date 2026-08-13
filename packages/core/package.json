@@ -1,0 +1,43 @@
+{
+  "name": "@night-watch/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./db": "./src/db/index.ts",
+    "./config": "./src/config/index.ts",
+    "./logger": "./src/logger.ts",
+    "./alerts": "./src/alerts/index.ts",
+    "./alerts/channels/whatsapp-baileys.ts": "./src/alerts/channels/whatsapp-baileys.ts",
+    "./collectors": "./src/collectors/index.ts",
+    "./analysis": "./src/analysis/index.ts",
+    "./web": "./src/web/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "bun run src/db/migrate.ts",
+    "db:seed": "bun run src/seed/seed.ts",
+    "db:demo": "bun run src/seed/demo.ts",
+    "db:collect": "bun run src/collectors/collect.ts",
+    "alert:test": "bun run src/alerts/test-alert.ts"
+  },
+  "dependencies": {
+    "@google-analytics/data": "latest",
+    "@whiskeysockets/baileys": "latest",
+    "croner": "latest",
+    "drizzle-orm": "latest",
+    "pino": "latest",
+    "pino-pretty": "latest",
+    "qrcode-terminal": "latest",
+    "web-push": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/qrcode-terminal": "latest",
+    "@types/web-push": "latest",
+    "drizzle-kit": "latest"
+  }
+}

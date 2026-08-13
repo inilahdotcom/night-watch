@@ -13,3 +13,21 @@ todos.json
 
 # typescript
 *.tsbuildinfo
+
+# runtime data — SQLite lives here; losing it kills the 4-week baseline
+data/
+
+# WhatsApp Baileys session auth (Stage 5+)
+apps/worker/auth_wa/
+
+# per-workspace build outputs
+apps/*/dist
+apps/*/.output
+apps/*/.tanstack
+packages/*/dist
+
+# tsconfig root
+tsconfig.tsbuildinfo
+
+# config
+config/monitors.json

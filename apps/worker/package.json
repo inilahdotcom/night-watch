@@ -1,0 +1,19 @@
+{
+  "name": "@night-watch/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@night-watch/core": "workspace:*",
+    "croner": "latest",
+    "qrcode-terminal": "latest"
+  },
+  "devDependencies": {
+    "@types/qrcode-terminal": "latest"
+  }
+}
