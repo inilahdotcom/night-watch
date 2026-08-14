@@ -22,7 +22,8 @@
     "db:seed": "bun run src/seed/seed.ts",
     "db:demo": "bun run src/seed/demo.ts",
     "db:collect": "bun run src/collectors/collect.ts",
-    "alert:test": "bun run src/alerts/test-alert.ts"
+    "alert:test": "bun run src/alerts/test-alert.ts",
+    "wa:groups": "bun run src/alerts/wa-groups.ts"
   },
   "dependencies": {
     "@google-analytics/data": "latest",

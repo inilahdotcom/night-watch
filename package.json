@@ -2,7 +2,10 @@
   "name": "night-watch",
   "private": true,
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev:web": "cd apps/web && bun run dev",
     "dev:worker": "cd apps/worker && bun run dev",
@@ -14,6 +17,7 @@
     "db:demo": "cd packages/core && bun run db:demo",
     "db:collect": "cd packages/core && bun run db:collect",
     "alert:test": "cd packages/core && bun run alert:test",
+    "wa:groups": "cd packages/core && bun run wa:groups",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
     "lint": "eslint .",

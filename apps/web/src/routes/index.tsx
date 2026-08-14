@@ -5,6 +5,7 @@ import {
   fetchActiveAlerts,
   fetchAlertHistory,
   fetchMonitors,
+  fetchSnoozes,
   fetchStatus,
   fetchSystemHealth,
 } from "../lib/server-fns";
@@ -13,6 +14,8 @@ import { ActiveAlerts } from "../components/alerts-list";
 import { History } from "../components/history";
 import { MonitorCard } from "../components/monitor-card";
 import { SubscribeButton } from "../components/subscribe-button";
+import { SnoozeControls } from "../components/snooze-controls";
+import { Loader } from "../components/ui/loader";
 
 export const Route = createFileRoute("/")({ component: DashboardPage });
 
@@ -54,6 +57,21 @@ function DashboardBody() {
   });
   const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => fetchMonitors() });
   const system = useQuery({ queryKey: ["system"], queryFn: () => fetchSystemHealth() });
+  const snoozes = useQuery({ queryKey: ["snoozes"], queryFn: () => fetchSnoozes() });
+
+  // Show the full-page loader only on the very first fetch of the primary
+  // data. Once we have snapshots, subsequent refetches are silent so the
+  // "just now / refreshing…" chip in <Verdict> is the source of truth.
+  const bootstrapping =
+    status.isPending || monitors.isPending || active.isPending || system.isPending;
+
+  if (bootstrapping) {
+    return (
+      <main className="mx-auto flex min-h-svh max-w-3xl items-center justify-center px-5 sm:px-8">
+        <Loader label="Night Watch" hint="Gathering the latest signal…" />
+      </main>
+    );
+  }
 
   return (
     <main className="mx-auto min-h-svh max-w-3xl px-5 pb-24 sm:px-8">
@@ -72,6 +90,8 @@ function DashboardBody() {
       )}
 
       <SubscribeButton system={system.data} />
+
+      <SnoozeControls snoozes={snoozes.data} monitors={monitors.data} />
 
       <ActiveAlerts alerts={active.data} />
 

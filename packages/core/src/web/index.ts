@@ -1,5 +1,6 @@
 export {
   getActiveAlerts,
+  getActiveSnoozes,
   getAlertHistory,
   getMonitors,
   getRecentAlertCount,
@@ -12,9 +13,11 @@ export {
   type MonitorSummaryView,
   type OverallVerdict,
   type SeriesPoint,
+  type SnoozesView,
   type StatusView,
   type SystemHealthView,
 } from "./queries.ts";
+export type { AdhocSnooze, MaintenanceWindow, SnoozeScope } from "../alerts/maintenance.ts";
 
 export {
   enqueueCommand,

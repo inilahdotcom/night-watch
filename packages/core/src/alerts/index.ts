@@ -19,6 +19,17 @@ export {
   type QuietWindow,
 } from "./quiet-hours.ts";
 export {
+  clearSnooze,
+  isInMaintenanceAt,
+  isSnoozedNow,
+  readActiveSnoozes,
+  writeSnooze,
+  type AdhocSnooze,
+  type MaintenanceWindow,
+  type SnoozeResult,
+  type SnoozeScope,
+} from "./maintenance.ts";
+export {
   buildDefaultHandlers,
   enqueueCommand,
   pollAndExecute,

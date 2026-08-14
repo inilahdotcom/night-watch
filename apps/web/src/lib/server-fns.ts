@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import {
   getActiveAlerts,
+  getActiveSnoozes,
   getAlertHistory,
   getMonitors,
   getSeries,
@@ -84,6 +85,18 @@ export const fetchSystemHealth = createServerFn({ method: "GET", strict: { outpu
   });
 });
 
+export const fetchSnoozes = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
+  const { sqlite } = openDb();
+  const cfg = loadMonitors();
+  return getActiveSnoozes(
+    sqlite,
+    cfg.monitors.map((m) => ({
+      id: m.id,
+      maintenanceWindows: m.maintenanceWindows,
+    })),
+  );
+});
+
 // -----------------------------------------------------------------------
 // WRITES (the two allowed tables only)
 // -----------------------------------------------------------------------
@@ -112,7 +125,7 @@ export const doUnsubscribePush = createServerFn({ method: "POST" })
 export const doEnqueueCommand = createServerFn({ method: "POST" })
   .validator(
     z.object({
-      kind: z.enum(["test_alert", "wa_relink"]),
+      kind: z.enum(["test_alert", "wa_relink", "snooze", "unsnooze"]),
       payload: z.record(z.string(), z.unknown()).optional(),
     }),
   )

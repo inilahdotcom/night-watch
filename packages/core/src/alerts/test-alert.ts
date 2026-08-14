@@ -137,8 +137,11 @@ async function printQr(qr: string): Promise<void> {
       default?: { generate: (text: string, opts?: { small: boolean }) => void };
       generate?: (text: string, opts?: { small: boolean }) => void;
     };
-    const generate = mod.default?.generate ?? mod.generate;
-    if (generate) generate(qr, { small: true });
+    // Must call through the owning object — `generate` uses `this` for the
+    // error-correction level, so a detached reference throws.
+    const host = mod.default?.generate ? mod.default : mod.generate ? mod : null;
+    if (host) host.generate!(qr, { small: true });
+    else console.log("QR:", qr);
   } catch {
     console.log("QR:", qr);
   }

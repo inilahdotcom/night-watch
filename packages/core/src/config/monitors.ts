@@ -2,6 +2,14 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { loadEnv } from "./env.ts";
 
+const HHMM = /^\d{2}:\d{2}$/;
+
+const MaintenanceWindowSchema = z.object({
+  start: z.string().regex(HHMM, "expected HH:MM"),
+  end: z.string().regex(HHMM, "expected HH:MM"),
+  daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+});
+
 const MonitorSchema = z.object({
   id: z.string().min(1),
   url: z.string().url(),
@@ -35,6 +43,10 @@ const MonitorSchema = z.object({
   // Source identifiers — optional until Stage 4 collectors ship.
   cloudflareZoneId: z.string().optional(),
   ga4PropertyId: z.string().optional(),
+
+  // Recurring maintenance windows. Same wall-clock semantics as quietHours
+  // but per-monitor and applied to ALL alerts, not just WhatsApp.
+  maintenanceWindows: z.array(MaintenanceWindowSchema).default([]),
 });
 
 const QuietHoursSchema = z

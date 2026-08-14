@@ -1,7 +1,9 @@
+import { z } from "zod";
 import { createLogger } from "../logger.ts";
 import type { Database } from "bun:sqlite";
 import type { CommandKind } from "../db/schema.ts";
 import type { AlertEngine } from "./engine.ts";
+import { clearSnooze, writeSnooze, type SnoozeScope } from "./maintenance.ts";
 
 // Commands outbox. The web app writes rows into the `commands` table (via
 // server functions) and the worker polls them here. This is what lets the
@@ -15,6 +17,8 @@ import type { AlertEngine } from "./engine.ts";
 export interface CommandHandlers {
   test_alert: () => Promise<void>;
   wa_relink: () => Promise<void>;
+  snooze: (payload: unknown) => Promise<void>;
+  unsnooze: (payload: unknown) => Promise<void>;
 }
 
 export interface OutboxPollOptions {
@@ -59,12 +63,19 @@ export async function pollAndExecute(opts: OutboxPollOptions): Promise<number> {
   for (const row of rows) {
     const kind = row.kind as CommandKind;
     try {
+      const payload = row.payload ? JSON.parse(row.payload) : null;
       switch (kind) {
         case "test_alert":
           await opts.handlers.test_alert();
           break;
         case "wa_relink":
           await opts.handlers.wa_relink();
+          break;
+        case "snooze":
+          await opts.handlers.snooze(payload);
+          break;
+        case "unsnooze":
+          await opts.handlers.unsnooze(payload);
           break;
         default: {
           const _exhaustive: never = kind;
@@ -106,9 +117,24 @@ export function enqueueCommand(
 /** Bind together the alert engine + WhatsApp adapter into a set of handlers. */
 export interface HandlerContext {
   engine: AlertEngine;
+  /** Required for snooze / unsnooze handlers to write to system_state. */
+  sqlite: Database;
   /** Optional — omit if WhatsApp isn't configured. */
   clearWhatsAppAuth?: () => Promise<void>;
 }
+
+// Payload schemas kept close to the handlers that consume them. The web layer
+// validates loosely (any object); the worker is the trust boundary.
+const ScopeSchema = z.union([
+  z.literal("global"),
+  z.object({ monitor: z.string().min(1) }),
+]);
+const SnoozePayloadSchema = z.object({
+  scope: ScopeSchema,
+  durationMinutes: z.number().int().min(1).max(1440),
+  reason: z.string().max(120).optional(),
+});
+const UnsnoozePayloadSchema = z.object({ scope: ScopeSchema });
 
 export function buildDefaultHandlers(ctx: HandlerContext): CommandHandlers {
   return {
@@ -138,6 +164,20 @@ export function buildDefaultHandlers(ctx: HandlerContext): CommandHandlers {
         throw new Error("whatsapp not configured in this worker");
       }
       await ctx.clearWhatsAppAuth();
+    },
+    async snooze(payload) {
+      const parsed = SnoozePayloadSchema.parse(payload);
+      const startedAt = Math.floor(Date.now() / 1000);
+      writeSnooze(ctx.sqlite, {
+        scope: parsed.scope as SnoozeScope,
+        startedAt,
+        endsAt: startedAt + parsed.durationMinutes * 60,
+        reason: parsed.reason,
+      });
+    },
+    async unsnooze(payload) {
+      const parsed = UnsnoozePayloadSchema.parse(payload);
+      clearSnooze(ctx.sqlite, parsed.scope as SnoozeScope);
     },
   };
 }

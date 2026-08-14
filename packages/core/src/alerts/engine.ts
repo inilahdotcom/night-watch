@@ -37,6 +37,16 @@ export interface AlertEngineConfig {
   timezoneLabel?: string;
   /** Injectable clock (unix seconds). Defaults to Date.now/1000. */
   now?: () => number;
+  /**
+   * Optional per-monitor maintenance / snooze check. When it returns
+   * `suppressed: true`, `deliver()` records every channel as skipped
+   * (with `maintenance: <reason>` detail) and returns early — except
+   * for resolves, which always break through.
+   */
+  getMaintenanceStatus?: (
+    monitorId: string,
+    nowSeconds: number,
+  ) => { suppressed: boolean; reason?: string };
 }
 
 export type AlertAction =
@@ -131,6 +141,29 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
   ): Promise<AlertOutcome["channelResults"]> {
     const results: AlertOutcome["channelResults"] = [];
     const nowTs = now();
+
+    // Maintenance / snooze: suppress every channel for firing alerts.
+    // Resolves always break through — the operator wants to know "we're back".
+    if (rendered.status !== "resolved" && config.getMaintenanceStatus) {
+      const m = config.getMaintenanceStatus(rendered.monitor, nowTs);
+      if (m.suppressed) {
+        const reason = m.reason ?? "active";
+        const detail = `maintenance: ${reason}`;
+        log.info(
+          { monitor: rendered.monitor, alertId: rendered.id, reason },
+          "alert suppressed by maintenance window / snooze",
+        );
+        for (const channel of config.channels) {
+          recordDelivery(rendered.id, channel.name, "skipped", detail);
+          results.push({
+            channel: channel.name,
+            result: { ok: false, detail: `skipped: ${detail}` },
+          });
+        }
+        return results;
+      }
+    }
+
     const isQuiet =
       config.quietHours !== null &&
       isQuietAt(nowTs, config.quietHours, config.utcOffsetHours);
