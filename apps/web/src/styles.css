@@ -172,3 +172,63 @@
     transition-duration: 0s !important;
   }
 }
+
+/* ---------------------------------------------------------------------
+ * Marketing page (/landing) motion.
+ *
+ * Scroll motion is CSS scroll-driven, not a JS animation library: the same
+ * reason the fonts are self-hosted. This app is what you open when the
+ * network is misbehaving, and a status surface should not ship a runtime
+ * animation bundle to fade a heading in.
+ *
+ * Everything below is opt-in via @supports, and the un-animated state is the
+ * *visible* one — where `animation-timeline` is unsupported (Firefox today)
+ * the content simply renders, it does not stay stuck at opacity 0.
+ * Only transform and opacity are animated.
+ * ------------------------------------------------------------------ */
+
+@keyframes nw-rise {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes nw-settle {
+  from { opacity: 0; transform: translateY(28px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Hero load-in. Time-based, so it does not depend on scroll support. */
+@media (prefers-reduced-motion: no-preference) {
+  .nw-enter {
+    animation: nw-rise 620ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--nw-i, 0) * 90ms);
+  }
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .nw-reveal {
+      animation: nw-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 5% cover 22%;
+    }
+    .nw-reveal-asset {
+      animation: nw-settle linear both;
+      animation-timeline: view();
+      animation-range: entry 2% cover 30%;
+    }
+  }
+}
+
+/* Hairline that fades at both ends, used to separate marketing sections
+ * without drawing a hard full-width rule across the canvas. */
+.nw-rule {
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--border) 12%,
+    var(--border) 88%,
+    transparent
+  );
+}
