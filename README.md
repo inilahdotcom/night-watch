@@ -273,8 +273,8 @@ For scheduled maintenance ("every Sunday 02:00-04:00 we run backups and the orig
   "id": "shop",
   "url": "https://shop.example",
   "maintenanceWindows": [
-    { "start": "02:00", "end": "04:00", "daysOfWeek": [0] } // Sundays only
-  ]
+    { "start": "02:00", "end": "04:00", "daysOfWeek": [0] }, // Sundays only
+  ],
 }
 ```
 

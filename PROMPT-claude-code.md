@@ -14,7 +14,7 @@ Stack: **TanStack Start + shadcn/ui + TypeScript**. Semua dependensi harus berli
 
 Pengetahuan model tentang TanStack Start kemungkinan besar sudah usang — framework ini pindah dari Vinxi ke Vite di pertengahan 2025, nama paketnya berubah dari `@tanstack/start` ke `@tanstack/react-start`, dan v1.0 baru rilis Maret 2026. **Jangan mengandalkan ingatan.** Lakukan ini dulu:
 
-1. Baca `https://tanstack.com/start/latest/docs/framework/react/overview` dan halaman *server functions*, *server routes*, serta *hosting/deployment*.
+1. Baca `https://tanstack.com/start/latest/docs/framework/react/overview` dan halaman _server functions_, _server routes_, serta _hosting/deployment_.
 2. Baca `https://ui.shadcn.com/docs/installation/tanstack`.
 3. Baru scaffold proyek dengan CLI resmi yang berlaku saat ini.
 
@@ -69,21 +69,21 @@ Kalau kamu merasa ada pendekatan yang lebih baik, sampaikan alasannya dulu sebel
 
 ## 3. Stack
 
-| Kebutuhan | Pilihan | Catatan |
-| --- | --- | --- |
-| Framework web | `@tanstack/react-start` | preset deploy `node-server` |
-| UI | shadcn/ui + Tailwind v4 | komponen di-*copy in*, bukan dependensi — silakan edit langsung |
-| Data fetching | TanStack Query | polling 20 detik, `refetchOnWindowFocus` |
-| Database | SQLite via `better-sqlite3` | native, hanya jalan di Node |
-| ORM & migrasi | Drizzle ORM + drizzle-kit | skema di `packages/core`, dipakai kedua proses |
-| Penjadwal | `croner` | kolom detik cron hanya 0–59, lihat jebakan di §9 |
-| Push | `web-push` (VAPID) | MPL-2.0, tetap OSI |
-| WhatsApp | `@whiskeysockets/baileys` + `qrcode-terminal` | |
-| GA4 | `@google-analytics/data` | Realtime API |
-| Cloudflare | `fetch` biasa ke GraphQL Analytics API | tidak perlu SDK |
-| Logging | `pino` (+ `pino-pretty` saat dev) | |
-| Validasi env | `zod` | gagal cepat saat boot, jangan `undefined` merembes |
-| Test | `vitest` | |
+| Kebutuhan     | Pilihan                                       | Catatan                                                         |
+| ------------- | --------------------------------------------- | --------------------------------------------------------------- |
+| Framework web | `@tanstack/react-start`                       | preset deploy `node-server`                                     |
+| UI            | shadcn/ui + Tailwind v4                       | komponen di-_copy in_, bukan dependensi — silakan edit langsung |
+| Data fetching | TanStack Query                                | polling 20 detik, `refetchOnWindowFocus`                        |
+| Database      | SQLite via `better-sqlite3`                   | native, hanya jalan di Node                                     |
+| ORM & migrasi | Drizzle ORM + drizzle-kit                     | skema di `packages/core`, dipakai kedua proses                  |
+| Penjadwal     | `croner`                                      | kolom detik cron hanya 0–59, lihat jebakan di §9                |
+| Push          | `web-push` (VAPID)                            | MPL-2.0, tetap OSI                                              |
+| WhatsApp      | `@whiskeysockets/baileys` + `qrcode-terminal` |                                                                 |
+| GA4           | `@google-analytics/data`                      | Realtime API                                                    |
+| Cloudflare    | `fetch` biasa ke GraphQL Analytics API        | tidak perlu SDK                                                 |
+| Logging       | `pino` (+ `pino-pretty` saat dev)             |                                                                 |
+| Validasi env  | `zod`                                         | gagal cepat saat boot, jangan `undefined` merembes              |
+| Test          | `vitest`                                      |                                                                 |
 
 ---
 
@@ -157,14 +157,14 @@ Butuh `failThreshold` kegagalan berturut-turut (default 3) untuk `DOWN`, dan `re
 
 Tidak ada satu metrik pun yang bisa menyatakan "ini serangan". Pakai skor gabungan dari sinyal Cloudflare dalam satu bucket:
 
-| Sinyal | Bobot |
-| --- | --- |
-| Volume request ≥ `spikeZ` di atas normal | 2 (3 kalau ≥ 2× `spikeZ`) |
-| ≥ `threatRatioCrit` (35%) request diblokir/ditantang firewall | 3 |
-| ≥ `threatRatioWarn` (15%) request dimitigasi firewall | 2 |
-| Origin mengembalikan ≥ `errorRatio` (10%) status 5xx | 2 |
-| Cache miss ≥ 70% **bersamaan dengan** lonjakan volume | 2 |
-| ≥ 5% request kena rate limit (429) | 1 |
+| Sinyal                                                        | Bobot                     |
+| ------------------------------------------------------------- | ------------------------- |
+| Volume request ≥ `spikeZ` di atas normal                      | 2 (3 kalau ≥ 2× `spikeZ`) |
+| ≥ `threatRatioCrit` (35%) request diblokir/ditantang firewall | 3                         |
+| ≥ `threatRatioWarn` (15%) request dimitigasi firewall         | 2                         |
+| Origin mengembalikan ≥ `errorRatio` (10%) status 5xx          | 2                         |
+| Cache miss ≥ 70% **bersamaan dengan** lonjakan volume         | 2                         |
+| ≥ 5% request kena rate limit (429)                            | 1                         |
 
 `warning` pada skor ≥ 3, `critical` pada skor ≥ 5. Diamkan sama sekali kalau total request < `minRequests` (default 300).
 
@@ -244,19 +244,19 @@ Standar minimum tanpa perlu diumumkan: responsif sampai lebar ponsel, focus ring
 Kerjakan bertahap. **Berhenti di tiap checkpoint, laporkan, tunggu konfirmasi saya.** Jangan menyelesaikan semuanya sekaligus lalu menyerahkan 40 file.
 
 **Tahap 1 — Fondasi.** Monorepo pnpm, scaffold TanStack Start, shadcn init, drizzle schema + migrasi, config loader dengan validasi zod, logger.
-*Checkpoint*: `pnpm typecheck` bersih, migrasi jalan, halaman kosong tampil.
+_Checkpoint_: `pnpm typecheck` bersih, migrasi jalan, halaman kosong tampil.
 
 **Tahap 2 — Deteksi + test.** Fungsi murni baseline, traffic, DDoS. Vitest dengan kasus: traffic normal, lonjakan, anjlok, MAD=0, deretan nol, sampel kurang dari minimum, penjaga `minBaseline` dan `minRelativeChange`.
-*Checkpoint*: seluruh test hijau. **Ini tahap yang paling penting — jangan lanjut sebelum yakin.**
+_Checkpoint_: seluruh test hijau. **Ini tahap yang paling penting — jangan lanjut sebelum yakin.**
 
 **Tahap 3 — Data sintetis.** Skrip seed yang menghasilkan 6 minggu metrik palsu dengan pola harian dan mingguan yang realistis, plus flag untuk menyuntikkan lonjakan/anjlok/serangan di titik tertentu. Tanpa ini, menguji baseline musiman berarti menunggu empat minggu.
-*Checkpoint*: jalankan detektor terhadap data seed, tunjukkan alert yang terpicu dan yang benar-benar diabaikan.
+_Checkpoint_: jalankan detektor terhadap data seed, tunjukkan alert yang terpicu dan yang benar-benar diabaikan.
 
 **Tahap 4 — Collector.** Cloudflare GraphQL (satu dokumen dengan empat alias: total, per status, per cache status, firewall events — jangan empat request terpisah), GA4 Realtime, prober uptime.
-*Checkpoint*: dengan kredensial asli, data masuk ke tabel `metrics`.
+_Checkpoint_: dengan kredensial asli, data masuk ke tabel `metrics`.
 
 **Tahap 5 — Alerting.** Mesin alert, kanal push, kanal WhatsApp, tabel `commands`.
-*Checkpoint*: `test_alert` sampai ke browser dan grup WhatsApp.
+_Checkpoint_: `test_alert` sampai ke browser dan grup WhatsApp.
 
 **Tahap 6 — Worker.** Penjadwal, siklus analisis, graceful shutdown, pembersihan data lama.
 

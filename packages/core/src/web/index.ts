@@ -3,6 +3,7 @@ export {
   getActiveSnoozes,
   getAlertHistory,
   getMonitors,
+  getPulse,
   getRecentAlertCount,
   getSeries,
   getStatus,
@@ -10,12 +11,19 @@ export {
   getWhatsAppQr,
   type ActiveAlertView,
   type HistoryEntryView,
+  type MonitorIdentityInput,
   type MonitorSummaryView,
+  type MonitorThresholds,
   type OverallVerdict,
+  type PulseBucket,
+  type PulseMonitorInput,
+  type PulseState,
+  type PulseView,
   type SeriesPoint,
   type SnoozesView,
   type StatusView,
   type SystemHealthView,
+  type ThresholdSignal,
 } from "./queries.ts";
 export type { AdhocSnooze, MaintenanceWindow, SnoozeScope } from "../alerts/maintenance.ts";
 

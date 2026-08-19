@@ -54,7 +54,11 @@ export interface RobustZResult {
 }
 
 // 0.6745 = quantile(Normal, 0.75), makes MAD comparable to stddev under normal.
-const MAD_TO_SIGMA = 0.6745;
+//
+// Exported because the dashboard has to invert the z-score to draw the band:
+// the value at which |z| hits spikeZ is median ± (spikeZ × scale) / MAD_TO_SIGMA.
+// Re-typing 0.6745 over there would let the drawn band drift from the tested one.
+export const MAD_TO_SIGMA = 0.6745;
 
 /**
  * Robust z-score with a documented fallback ladder:

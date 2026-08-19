@@ -1,106 +1,159 @@
-import type { SeriesPoint } from "@night-watch/core/web";
+import type { PulseBucket, PulseState } from "@night-watch/core/web";
 
-// The signature element (brief §7). One thin vertical bar per 5-minute bucket
-// over the last 6 hours (~72 bars). A darker horizontal band behind marks the
-// "normal" range (P15–P85 of the shown window). Bars outside the band are
-// coloured — anomalies read at a glance.
+// The signature element (brief §7). One thin vertical bar per bucket over the
+// window, with the detector's own baseline band drawn behind it.
 //
-// Direct SVG rendering — no chart library. The shape is too simple to justify
-// recharts and DOM-native output stays crisp on high-DPI phones.
+// The band used to be the P15-P85 of the displayed window, which is
+// self-referential: 15% of bars are always below P15 and 15% always above P85,
+// so ~30% of every chart was coloured even when the monitor was perfectly
+// healthy, and none of those colours corresponded to an alert anyone received.
+//
+// Now the band comes from getPulse(), which runs gatherBaseline +
+// evaluateTraffic with the monitor's own tuning. A coloured bar here means the
+// same thing a WhatsApp message means.
+//
+// Direct SVG — no chart library. The shape is too simple to justify recharts,
+// and DOM-native output stays crisp on high-DPI phones.
 
 interface Props {
-  series: SeriesPoint[];
-  /** Fixed height in px. */
+  buckets: PulseBucket[];
+  bucketSeconds: number;
+  windowHours: number;
   height?: number;
-  /** Max bars — clamps the trailing window. */
-  maxBars?: number;
-  /** Colour override (default = muted foreground). */
-  color?: string;
-  anomalyColor?: string;
 }
 
-const DEFAULT_HEIGHT = 48;
-const DEFAULT_MAX_BARS = 72; // 6h @ 5m
+const DEFAULT_HEIGHT = 64;
 const BAR_GAP = 1;
 const BAR_MIN_HEIGHT = 2;
+const VIEW_WIDTH = 320;
+
+// Deliberately only two hues. "We cannot judge this" states render as calm as
+// "normal" — the card explains them in words instead, because a colour that
+// means "no verdict" is indistinguishable from one that means "fine".
+const BAR_STYLE: Record<PulseState, { fill: string; opacity: number }> = {
+  normal: { fill: "var(--muted-foreground)", opacity: 0.45 },
+  "below-floor": { fill: "var(--muted-foreground)", opacity: 0.45 },
+  "no-baseline": { fill: "var(--muted-foreground)", opacity: 0.45 },
+  unevaluated: { fill: "var(--muted-foreground)", opacity: 0.18 },
+  deviating: { fill: "var(--status-warning)", opacity: 0.45 },
+  confirmed: { fill: "var(--status-warning)", opacity: 1 },
+};
 
 export function PulseBand({
-  series,
+  buckets,
+  bucketSeconds,
+  windowHours,
   height = DEFAULT_HEIGHT,
-  maxBars = DEFAULT_MAX_BARS,
-  color = "var(--muted-foreground)",
-  anomalyColor = "var(--status-warning)",
 }: Props) {
-  if (series.length === 0) {
+  if (buckets.length === 0) {
     return (
       <div
-        className="grid place-items-center rounded-md bg-secondary/30 text-xs text-muted-foreground"
+        className="grid place-items-center rounded-lg bg-secondary/30 text-xs text-muted-foreground"
         style={{ height }}
       >
-        no data yet
+        No traffic data for this window yet
       </div>
     );
   }
 
-  // Take the trailing `maxBars` points, sorted ascending by bucketTs.
-  const points = series.slice(-maxBars);
-  const n = points.length;
-  const values = points.map((p) => p.value);
-  const sorted = [...values].sort((a, b) => a - b);
-  const p15 = percentile(sorted, 0.15);
-  const p85 = percentile(sorted, 0.85);
-  const max = Math.max(...values, 1);
+  const n = buckets.length;
 
-  const width = 320;
-  const barSlot = (width - BAR_GAP * (n - 1)) / n;
+  // Scaling to the band's upper edge would be the obvious choice, but the band
+  // is often far wider than the traffic (±40% of the median at minimum), which
+  // squashes every bar into the bottom third for no information gained. So we
+  // scale to the traffic, and guarantee only the band's *lower* edge stays in
+  // frame — that edge is the one a drop has to cross. The upper edge clipping
+  // off the top reads correctly as "nowhere near the ceiling".
+  const maxValue = Math.max(1, ...buckets.map((b) => b.value));
+  const maxLow = Math.max(0, ...buckets.map((b) => b.low ?? 0));
+  const ceiling = Math.max(maxValue * 1.15, maxLow * 1.05);
+  const barSlot = (VIEW_WIDTH - BAR_GAP * (n - 1)) / n;
+  const xFor = (i: number): number => i * (barSlot + BAR_GAP);
+  const yFor = (v: number): number => height - (v / ceiling) * height;
 
-  // Y-axis: 0 at bottom, max at top; SVG y-axis is flipped so translate.
-  const yFor = (v: number): number => height - (v / max) * height;
-
-  // Convert P15–P85 range into rect coords.
-  const bandY = yFor(p85);
-  const bandHeight = yFor(p15) - bandY;
+  const confirmedCount = buckets.filter((b) => b.state === "confirmed").length;
+  const deviatingCount = buckets.filter((b) => b.state === "deviating").length;
 
   return (
-    <svg
-      role="img"
-      aria-label={`Pulse of requests over the last ${maxBars} buckets`}
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      style={{ width: "100%", height }}
-    >
-      {/* Normal-range band */}
-      <rect
-        x={0}
-        y={bandY}
-        width={width}
-        height={Math.max(bandHeight, 1)}
-        fill="var(--muted-foreground)"
-        opacity={0.08}
-      />
-      {/* Bars */}
-      {points.map((p, i) => {
-        const barHeight = Math.max((p.value / max) * height, BAR_MIN_HEIGHT);
-        const barY = height - barHeight;
-        const isAnomaly = p.value < p15 || p.value > p85;
-        return (
-          <rect
-            key={p.bucketTs}
-            x={i * (barSlot + BAR_GAP)}
-            y={barY}
-            width={barSlot}
-            height={barHeight}
-            fill={isAnomaly ? anomalyColor : color}
-            opacity={isAnomaly ? 0.95 : 0.65}
-          />
-        );
-      })}
-    </svg>
+    <div>
+      <svg
+        role="img"
+        aria-label={summarise({
+          total: buckets.length,
+          confirmed: confirmedCount,
+          deviating: deviatingCount,
+          hours: windowHours,
+          bucketSeconds,
+        })}
+        viewBox={`0 0 ${VIEW_WIDTH} ${height}`}
+        preserveAspectRatio="none"
+        style={{ width: "100%", height }}
+      >
+        {/* Baseline band. Stepped, because the expected value moves with the
+            time of day — a flat band would be the same lie as before. */}
+        {buckets.map((b, i) =>
+          b.low === null || b.high === null ? null : (
+            <rect
+              key={`band-${b.bucketTs}`}
+              x={xFor(i)}
+              y={Math.max(0, yFor(b.high))}
+              width={barSlot + BAR_GAP}
+              height={Math.max(
+                Math.min(height, yFor(b.low)) - Math.max(0, yFor(b.high)),
+                1,
+              )}
+              fill="var(--muted-foreground)"
+              opacity={0.16}
+            />
+          ),
+        )}
+
+        {buckets.map((b, i) => {
+          const barHeight = Math.max((b.value / ceiling) * height, BAR_MIN_HEIGHT);
+          const style = BAR_STYLE[b.state];
+          return (
+            <rect
+              key={b.bucketTs}
+              x={xFor(i)}
+              y={height - barHeight}
+              width={barSlot}
+              height={barHeight}
+              fill={style.fill}
+              opacity={style.opacity}
+            />
+          );
+        })}
+      </svg>
+
+      <div className="mono mt-1.5 flex items-center justify-between text-[10px] text-muted-foreground">
+        <span>{windowHours}h ago</span>
+        <span aria-hidden>peak {formatCount(maxValue)}</span>
+        <span>now</span>
+      </div>
+    </div>
   );
 }
 
-function percentile(sorted: number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * p));
-  return sorted[idx]!;
+function summarise(args: {
+  total: number;
+  confirmed: number;
+  deviating: number;
+  hours: number;
+  bucketSeconds: number;
+}): string {
+  const minutes = Math.round(args.bucketSeconds / 60);
+  const base = `Requests per ${minutes}-minute bucket over the last ${args.hours} hours, ${args.total} buckets`;
+  if (args.confirmed > 0) {
+    return `${base}. ${args.confirmed} in a confirmed traffic anomaly.`;
+  }
+  if (args.deviating > 0) {
+    return `${base}. ${args.deviating} outside the baseline but not confirmed.`;
+  }
+  return `${base}. All within the baseline.`;
+}
+
+export function formatCount(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  return String(Math.round(v));
 }

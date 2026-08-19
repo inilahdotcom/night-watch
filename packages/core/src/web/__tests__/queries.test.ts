@@ -9,6 +9,7 @@ import {
   getActiveAlerts,
   getAlertHistory,
   getMonitors,
+  getPulse,
   getSeries,
   getStatus,
   getSystemHealth,
@@ -249,5 +250,236 @@ describe("getSystemHealth", () => {
     });
     expect(r.waNeedsRelink).toBe(false);
     expect(r.vapidPublicKey).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getPulse
+// ---------------------------------------------------------------------------
+//
+// The reason this query exists: the dashboard used to decide "anomalous" on
+// its own, colouring bars outside the P15-P85 of the *displayed window*. That
+// rule is self-referential — 15% of bars are always under P15 and 15% always
+// over P85 — so ~30% of every chart was coloured even on a perfectly steady
+// monitor, and none of it lined up with the alerts the engine actually sent.
+//
+// The first test below pins that down by running both rules over the same
+// steady data and asserting they disagree.
+
+const PULSE_BUCKET = 300;
+const PULSE_NOW = 1_759_999_800; // fixed, and divisible by PULSE_BUCKET
+
+const PULSE_MONITOR = {
+  id: "m1",
+  bucketSeconds: PULSE_BUCKET,
+  baselineWeeks: 4,
+  minSamples: 6,
+  spikeZ: 3.5,
+  minBaseline: 50,
+  minRelativeChange: 0.4,
+  consecutiveBuckets: 2,
+  ingestLagSeconds: 240,
+  probeIntervalSeconds: 60,
+  slowResponseMs: 3000,
+  errorRatio: 0.1,
+  threatRatioWarn: 0.15,
+  threatRatioCrit: 0.35,
+  minRequests: 300,
+};
+
+/** Steady traffic with deterministic jitter of about ±5% around 1000. */
+function steadyValue(i: number): number {
+  return 1000 + ((i * 37) % 100) - 50;
+}
+
+/** Writes `count` buckets of cf_requests ending at PULSE_NOW. */
+function seedTraffic(
+  sqlite: Database,
+  count: number,
+  value: (i: number, bucketTs: number) => number,
+): void {
+  const stmt = sqlite.prepare(
+    "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+  );
+  for (let i = 0; i < count; i += 1) {
+    const bucketTs = PULSE_NOW - (count - 1 - i) * PULSE_BUCKET;
+    stmt.run("m1", "cloudflare", "cf_requests", bucketTs, value(i, bucketTs));
+  }
+}
+
+function colouredCount(states: string[]): number {
+  return states.filter((s) => s === "deviating" || s === "confirmed").length;
+}
+
+/** The rule the old PulseBand used, reproduced so the two can be compared. */
+function oldRuleColoured(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const at = (p: number) =>
+    sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))]!;
+  const p15 = at(0.15);
+  const p85 = at(0.85);
+  return values.filter((v) => v < p15 || v > p85).length;
+}
+
+describe("getPulse", () => {
+  it("colours nothing on steady traffic, where the old P15-P85 rule coloured ~30%", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 200, steadyValue);
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    const judged = pulse.buckets.filter((b) => b.state !== "unevaluated");
+    expect(judged.length).toBeGreaterThan(50);
+    expect(colouredCount(judged.map((b) => b.state))).toBe(0);
+
+    // Same data, old rule: a large fraction of bars would have been coloured.
+    const old = oldRuleColoured(judged.map((b) => b.value));
+    expect(old / judged.length).toBeGreaterThan(0.2);
+  });
+
+  it("confirms a spike only once it persists for consecutiveBuckets", () => {
+    const { sqlite, db } = newDb();
+    // Two sustained 5x buckets, placed well behind the analysis lag.
+    const spikeFrom = 200 - 1 - 5;
+    seedTraffic(sqlite, 200, (i) =>
+      i >= spikeFrom && i < spikeFrom + 2 ? 5000 : steadyValue(i),
+    );
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    const confirmed = pulse.buckets.filter((b) => b.state === "confirmed");
+    expect(confirmed).toHaveLength(2);
+    expect(confirmed.every((b) => b.value === 5000)).toBe(true);
+    // Everything else stayed calm.
+    expect(
+      pulse.buckets.filter((b) => b.state === "deviating"),
+    ).toHaveLength(0);
+  });
+
+  it("never judges buckets newer than the analysis lag", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 200, steadyValue);
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    const unevaluated = pulse.buckets.filter((b) => b.state === "unevaluated");
+    // ingestLag 240s + one 300s bucket -> the newest 1-2 buckets.
+    expect(unevaluated.length).toBeGreaterThan(0);
+    expect(unevaluated.every((b) => b.expected === null)).toBe(true);
+    expect(unevaluated.every((b) => b.bucketTs > PULSE_NOW - 900)).toBe(true);
+  });
+
+  it("reports below-floor rather than a band when the baseline is under minBaseline", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 200, (i) => 10 + (i % 3));
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    const judged = pulse.buckets.filter((b) => b.state !== "unevaluated");
+    expect(judged.every((b) => b.state === "below-floor")).toBe(true);
+    expect(colouredCount(judged.map((b) => b.state))).toBe(0);
+  });
+
+  it("says no-baseline instead of guessing when history is too short", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 3, steadyValue);
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    expect(pulse.baselineSource).toBe("insufficient");
+    const judged = pulse.buckets.filter((b) => b.state !== "unevaluated");
+    expect(judged.every((b) => b.state === "no-baseline")).toBe(true);
+    expect(judged.every((b) => b.expected === null)).toBe(true);
+  });
+
+  it("carries the engine's own thresholds for the secondary signals", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 200, steadyValue);
+    insertProbe(sqlite, "m1", false); // last_latency_ms = 100
+
+    // Attach the ratios to the newest bucket the detectors will have judged,
+    // derived the same way the query derives it.
+    const lastEval =
+      Math.floor((PULSE_NOW - 240 - PULSE_BUCKET) / PULSE_BUCKET) * PULSE_BUCKET;
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+    );
+    // ~11.5% 5xx (over errorRatio 0.10) and ~19% threats (over warn, under crit).
+    stmt.run("m1", "cloudflare", "cf_status_5xx", lastEval, 120);
+    stmt.run("m1", "cloudflare", "cf_threats", lastEval, 200);
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+
+    expect(pulse.latency.value).toBe(100);
+    expect(pulse.latency.warn).toBe(3000);
+    expect(pulse.latency.breached).toBe("none");
+
+    expect(pulse.errors.warn).toBe(0.1);
+    expect(pulse.errors.breached).toBe("warn");
+    expect(pulse.errors.suppressed).toBe(false);
+
+    expect(pulse.threats.warn).toBe(0.15);
+    expect(pulse.threats.critical).toBe(0.35);
+    expect(pulse.threats.breached).toBe("warn");
+  });
+
+  it("suppresses the ratio signals below minRequests", () => {
+    const { sqlite, db } = newDb();
+    seedTraffic(sqlite, 200, () => 100); // under minRequests 300
+
+    const pulse = getPulse(db, sqlite, PULSE_MONITOR, {
+      hours: 6,
+      now: PULSE_NOW,
+    });
+    expect(pulse.errors.suppressed).toBe(true);
+    expect(pulse.errors.breached).toBe("none");
+    expect(pulse.threats.suppressed).toBe(true);
+  });
+});
+
+describe("getMonitors with config", () => {
+  it("carries label, url and thresholds through, and nulls them when unconfigured", () => {
+    const { sqlite, db } = newDb();
+    insertProbe(sqlite, "m1", false);
+    insertProbe(sqlite, "gone", false);
+
+    const rows = getMonitors(db, [
+      {
+        id: "m1",
+        url: "https://example.test",
+        label: "Example",
+        probeIntervalSeconds: 60,
+        slowResponseMs: 3000,
+        errorRatio: 0.1,
+        threatRatioWarn: 0.15,
+        threatRatioCrit: 0.35,
+        minRequests: 300,
+      },
+    ]);
+
+    const m1 = rows.find((r) => r.id === "m1")!;
+    expect(m1.label).toBe("Example");
+    expect(m1.url).toBe("https://example.test");
+    expect(m1.thresholds?.slowResponseMs).toBe(3000);
+
+    // A probe_state row that outlived its config entry must not pretend to
+    // have thresholds — the card uses this to explain itself.
+    const gone = rows.find((r) => r.id === "gone")!;
+    expect(gone.label).toBeNull();
+    expect(gone.url).toBeNull();
+    expect(gone.thresholds).toBeNull();
   });
 });

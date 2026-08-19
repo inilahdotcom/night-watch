@@ -5,6 +5,7 @@ import {
   getActiveSnoozes,
   getAlertHistory,
   getMonitors,
+  getPulse,
   getSeries,
   getStatus,
   getSystemHealth,
@@ -71,8 +72,34 @@ export const fetchSeries = createServerFn({ method: "GET", strict: { output: fal
 
 export const fetchMonitors = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
   const { db } = openDb();
-  return getMonitors(db);
+  const cfg = loadMonitors();
+  // Config carries the human label, the URL, and the thresholds the detectors
+  // compare against. Without it the dashboard can only show slugs and would
+  // have to hard-code 3000ms / 10% / 15%.
+  return getMonitors(db, cfg.monitors);
 });
+
+/**
+ * Chart data for one monitor, scored with that monitor's own detector tuning.
+ * Replaces the card's `fetchSeries` call: one round trip carries the traffic
+ * series, its baseline band, and the three threshold signals.
+ */
+export const fetchPulse = createServerFn({ method: "GET", strict: { output: false } })
+  .validator(
+    z.object({
+      monitor: z.string().min(1),
+      hours: z.number().int().positive().max(168).default(6),
+    }),
+  )
+  .handler(async ({ data }) => {
+    const { db, sqlite } = openDb();
+    const cfg = loadMonitors();
+    const monitor = cfg.monitors.find((m) => m.id === data.monitor);
+    if (!monitor) {
+      throw new Error(`unknown monitor: ${data.monitor}`);
+    }
+    return getPulse(db, sqlite, monitor, { hours: data.hours });
+  });
 
 export const fetchSystemHealth = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
   const { db } = openDb();

@@ -87,23 +87,63 @@ function saveState(
     .run(`${STATE_KEY_PREFIX}${monitorId}`, JSON.stringify(state), Date.now());
 }
 
-function alignBucket(ts: number, bucketSeconds: number): number {
+export function alignBucket(ts: number, bucketSeconds: number): number {
   return Math.floor(ts / bucketSeconds) * bucketSeconds;
 }
 
-function loadRequestsHistory(
+/**
+ * The newest bucket the analysis cycle is willing to judge: back off the
+ * ingest lag plus one full bucket so the bucket is definitely closed.
+ *
+ * Exported for the dashboard, which must not paint a verdict on buckets no
+ * detector has evaluated yet — those are the 1-2 newest bars on every chart.
+ */
+export function lastEvaluableBucket(
+  nowSec: number,
+  monitor: Pick<Monitor, "ingestLagSeconds" | "bucketSeconds">,
+): number {
+  return alignBucket(
+    nowSec - monitor.ingestLagSeconds - monitor.bucketSeconds,
+    monitor.bucketSeconds,
+  );
+}
+
+/**
+ * The cf_requests history the baseline gatherer compares against.
+ *
+ * Exported because the dashboard has to draw the *same* baseline the detector
+ * uses. Two copies of this query is exactly how the chart and the alert engine
+ * drifted apart in the first place — the chart invented its own notion of
+ * "normal" and coloured bars that no detector had ever looked at.
+ *
+ * `sinceTs` is optional and purely a bound on how much history to pull; the
+ * analysis cycle leaves it open (retention is the only limit), while the web
+ * read caps it at the few weeks the seasonal baseline can actually reach.
+ */
+export function loadRequestsHistory(
   sqlite: Database,
   monitor: string,
   beforeTs: number,
+  sinceTs?: number,
 ): HistoricalPoint[] {
-  const rows = sqlite
-    .prepare(
-      `SELECT bucket_ts, value FROM metrics
-        WHERE monitor = ? AND source = 'cloudflare' AND metric = 'cf_requests'
-          AND bucket_ts < ?
-        ORDER BY bucket_ts ASC`,
-    )
-    .all(monitor, beforeTs) as HistoryRow[];
+  const rows =
+    sinceTs === undefined
+      ? (sqlite
+          .prepare(
+            `SELECT bucket_ts, value FROM metrics
+              WHERE monitor = ? AND source = 'cloudflare' AND metric = 'cf_requests'
+                AND bucket_ts < ?
+              ORDER BY bucket_ts ASC`,
+          )
+          .all(monitor, beforeTs) as HistoryRow[])
+      : (sqlite
+          .prepare(
+            `SELECT bucket_ts, value FROM metrics
+              WHERE monitor = ? AND source = 'cloudflare' AND metric = 'cf_requests'
+                AND bucket_ts < ? AND bucket_ts >= ?
+              ORDER BY bucket_ts ASC`,
+          )
+          .all(monitor, beforeTs, sinceTs) as HistoryRow[]);
   return rows.map((r) => ({ bucketTs: r.bucket_ts, value: r.value }));
 }
 
@@ -169,10 +209,7 @@ export async function runAnalysisCycle(
 
   // Per brief §9: never analyse an immature bucket. Back off ingestLag +
   // one full bucket so the one we look at is definitely closed.
-  const evalTs = alignBucket(
-    now() - monitor.ingestLagSeconds - monitor.bucketSeconds,
-    monitor.bucketSeconds,
-  );
+  const evalTs = lastEvaluableBucket(now(), monitor);
   report.analyzedBucketTs = evalTs;
 
   const state = loadState(sqlite, monitor.id);

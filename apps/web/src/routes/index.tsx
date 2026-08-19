@@ -105,7 +105,10 @@ function DashboardBody() {
             that the worker is running.
           </div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2">
+          // One column: each card now carries a chart plus a three-up signal
+          // strip, and squeezing that into half of max-w-3xl made both
+          // unreadable.
+          <div className="grid gap-4">
             {monitors.data?.map((m) => (
               <MonitorCard key={m.id} monitor={m} />
             ))}

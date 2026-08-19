@@ -3,6 +3,7 @@ export {
   median,
   medianAbsoluteDeviation,
   robustZScore,
+  MAD_TO_SIGMA,
   type RobustZResult,
 } from "./stats.ts";
 
