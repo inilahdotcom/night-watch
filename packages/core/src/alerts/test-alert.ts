@@ -3,6 +3,7 @@ import { openDb } from "../db/client.ts";
 import { createLogger } from "../logger.ts";
 import { createAlertEngine } from "./engine.ts";
 import { createPushChannel } from "./channels/push.ts";
+import { createTelegramChannel } from "./channels/telegram.ts";
 import {
   createWhatsAppChannel,
   type WhatsAppAdapter,
@@ -17,12 +18,14 @@ import type { NotificationChannel, RenderedAlert } from "./types.ts";
 //   bun run alert:test-inline
 //
 // Sends a "test alert" through the engine and immediately resolves it. If
-// VAPID keys and WA_GROUP_JID are set, real notifications go out.
+// VAPID keys, WA_GROUP_JID, or Telegram credentials are set, real
+// notifications go out on each of those channels.
 
 // A trivial channel that logs whatever it gets — the fallback when neither
 // real channel is configured. Proves the render+deliver path works end-to-end.
 class ConsoleChannel implements NotificationChannel {
-  readonly name = "push" as const; // masquerade so tests still get counted
+  readonly name = "push" as const;
+  readonly mutedByQuietHours = false; // masquerade so tests still get counted
   isReady(): boolean {
     return true;
   }
@@ -55,6 +58,18 @@ async function main(): Promise<void> {
     log.info("push channel enabled (VAPID keys present)");
   } else {
     log.info("push channel disabled (VAPID keys missing)");
+  }
+
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    channels.push(
+      createTelegramChannel({
+        botToken: env.TELEGRAM_BOT_TOKEN,
+        chatId: env.TELEGRAM_CHAT_ID,
+      }),
+    );
+    log.info("telegram channel enabled (bot token + chat id present)");
+  } else {
+    log.info("telegram channel disabled (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing)");
   }
 
   let waAdapter: WhatsAppAdapter | null = null;

@@ -6,9 +6,12 @@ import {
   getAlertHistory,
   getMonitors,
   getPulse,
+  getPushHealth,
   getSeries,
   getStatus,
+  getRecentAlertCount,
   getSystemHealth,
+  getUptime,
 } from "@night-watch/core/web";
 import {
   enqueueCommand,
@@ -16,6 +19,7 @@ import {
   unsubscribePush,
 } from "@night-watch/core/web";
 import { openDb, loadEnv, loadMonitors } from "@night-watch/core";
+import { authMiddleware } from "./auth";
 
 // Server functions the dashboard calls. All reads go through queries.ts,
 // writes go through mutations.ts — that pair is the enforcement mechanism
@@ -25,12 +29,16 @@ import { openDb, loadEnv, loadMonitors } from "@night-watch/core";
 // READS
 // -----------------------------------------------------------------------
 
-export const fetchStatus = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
+export const fetchStatus = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
   const { db } = openDb();
   return getStatus(db);
 });
 
-export const fetchActiveAlerts = createServerFn({ method: "GET", strict: { output: false } }).handler(
+export const fetchActiveAlerts = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(
   async () => {
     const { db } = openDb();
     return getActiveAlerts(db);
@@ -38,6 +46,7 @@ export const fetchActiveAlerts = createServerFn({ method: "GET", strict: { outpu
 );
 
 export const fetchAlertHistory = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
   .validator(z.object({ limit: z.number().int().positive().max(200).default(25) }))
   .handler(async ({ data }) => {
     const { db } = openDb();
@@ -64,13 +73,16 @@ const SeriesInput = z.object({
 });
 
 export const fetchSeries = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
   .validator(SeriesInput)
   .handler(async ({ data }) => {
     const { db } = openDb();
     return getSeries(db, data);
   });
 
-export const fetchMonitors = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
+export const fetchMonitors = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
   const { db } = openDb();
   const cfg = loadMonitors();
   // Config carries the human label, the URL, and the thresholds the detectors
@@ -85,6 +97,7 @@ export const fetchMonitors = createServerFn({ method: "GET", strict: { output: f
  * series, its baseline band, and the three threshold signals.
  */
 export const fetchPulse = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
   .validator(
     z.object({
       monitor: z.string().min(1),
@@ -101,7 +114,38 @@ export const fetchPulse = createServerFn({ method: "GET", strict: { output: fals
     return getPulse(db, sqlite, monitor, { hours: data.hours });
   });
 
-export const fetchSystemHealth = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
+/** Push subscription health — how many devices quietly stopped receiving. */
+export const fetchPushHealth = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
+    const { db } = openDb();
+    return getPushHealth(db);
+  });
+
+/** Global "N alerts in the last 24h" — one number, all monitors. */
+export const fetchRecentAlertCount = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
+    const { db } = openDb();
+    return { count: getRecentAlertCount(db, 24), hours: 24 };
+  });
+
+/**
+ * Uptime ratios for one monitor. Separate from fetchPulse: the pulse window is
+ * hours, this one reaches back 30 days, and pairing them in one round trip
+ * would make the card wait on the chart.
+ */
+export const fetchUptime = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .validator(z.object({ monitor: z.string().min(1) }))
+  .handler(async ({ data }) => {
+    const { db } = openDb();
+    return getUptime(db, data.monitor);
+  });
+
+export const fetchSystemHealth = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
   const { db } = openDb();
   const env = loadEnv();
   const cfg = loadMonitors();
@@ -112,7 +156,9 @@ export const fetchSystemHealth = createServerFn({ method: "GET", strict: { outpu
   });
 });
 
-export const fetchSnoozes = createServerFn({ method: "GET", strict: { output: false } }).handler(async () => {
+export const fetchSnoozes = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .handler(async () => {
   const { sqlite } = openDb();
   const cfg = loadMonitors();
   return getActiveSnoozes(
@@ -129,6 +175,7 @@ export const fetchSnoozes = createServerFn({ method: "GET", strict: { output: fa
 // -----------------------------------------------------------------------
 
 export const doSubscribePush = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
   .validator(
     z.object({
       endpoint: z.string().url(),
@@ -143,6 +190,7 @@ export const doSubscribePush = createServerFn({ method: "POST" })
   });
 
 export const doUnsubscribePush = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
   .validator(z.object({ endpoint: z.string().url() }))
   .handler(async ({ data }) => {
     const { db } = openDb();
@@ -150,9 +198,17 @@ export const doUnsubscribePush = createServerFn({ method: "POST" })
   });
 
 export const doEnqueueCommand = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
   .validator(
     z.object({
-      kind: z.enum(["test_alert", "wa_relink", "snooze", "unsnooze"]),
+      kind: z.enum([
+        "test_alert",
+        "wa_relink",
+        "snooze",
+        "unsnooze",
+        "ack",
+        "unack",
+      ]),
       payload: z.record(z.string(), z.unknown()).optional(),
     }),
   )

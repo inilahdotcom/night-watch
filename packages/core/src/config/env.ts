@@ -23,6 +23,8 @@ const EnvSchema = z.object({
   VAPID_SUBJECT: z.string().default("mailto:admin@example.com"),
   WA_GROUP_JID: z.string().optional(),
   WA_AUTH_DIR: z.string().default("./apps/worker/auth_wa"),
+  TELEGRAM_BOT_TOKEN: z.string().optional(),
+  TELEGRAM_CHAT_ID: z.string().optional(),
 
   // Alert engine tuning.
   ALERT_COOLDOWN_MINUTES: z.coerce.number().int().positive().default(15),
@@ -30,7 +32,25 @@ const EnvSchema = z.object({
     .string()
     .default("true")
     .transform((v) => v.toLowerCase() !== "false"),
-});
+
+  // Dashboard auth. Both optional: with DASHBOARD_PASSWORD unset the app
+  // behaves exactly as it did before (open), which keeps `bun run dev:web`
+  // a one-command experience. SESSION_SECRET seeds the sealed session cookie
+  // and must be >= 32 chars — that's the floor the sealing algorithm enforces,
+  // so a short secret fails at first login rather than at boot.
+  DASHBOARD_PASSWORD: z.string().min(1).optional(),
+  SESSION_SECRET: z.string().min(32).optional(),
+
+  WEB_PORT: z.coerce.number().int().positive().default(3011),
+}).refine(
+  (v) => !v.DASHBOARD_PASSWORD || Boolean(v.SESSION_SECRET),
+  {
+    error:
+      "SESSION_SECRET (>= 32 chars) is required when DASHBOARD_PASSWORD is set — " +
+      "generate one with: openssl rand -base64 32",
+    path: ["SESSION_SECRET"],
+  },
+);
 
 export type Env = z.infer<typeof EnvSchema>;
 

@@ -1,9 +1,16 @@
 import type { AlertSeverity, AlertType } from "../db/schema.ts";
 import type { RenderedAlert } from "./types.ts";
 
-// Alert rendering. Produces both:
+// Alert rendering. Produces:
 //   - `textBody` — plain text with *bold* markers for WhatsApp
+//   - `htmlBody` — the same content marked up for Telegram
 //   - `pushPayload` — JSON blob for the service worker
+//
+// The two text forms are built from one line list rather than by
+// post-processing `textBody`: WhatsApp's `*bold*` and Telegram's `<b>` are
+// different enough that converting between them means writing a parser for
+// asterisks, which then has to worry about asterisks that appear in an alert
+// body for unrelated reasons.
 //
 // WhatsApp gets WIB times (per brief §6). Push carries UTC + severity so the
 // service worker can render whatever the browser locale prefers.
@@ -54,28 +61,57 @@ export function renderAlert(
     ? `✅ RECOVERED — ${alert.title}`
     : `${SEVERITY_TAG[alert.severity]} — ${alert.title}`;
 
-  const lines: string[] = [`*${heading}*`, `monitor: *${alert.monitor}*`, ""];
-  lines.push(alert.body);
-  lines.push("");
+  // Each entry is (plain text, is-bold). Rendering to WhatsApp or Telegram is
+  // then a matter of wrapping, not of rewriting.
+  type Segment = { text: string; bold?: boolean };
+  const lines: Segment[][] = [
+    [{ text: heading, bold: true }],
+    [{ text: "monitor: " }, { text: alert.monitor, bold: true }],
+    [],
+    [{ text: alert.body }],
+    [],
+  ];
   if (isResolution && alert.resolvedAt !== null) {
     const resolvedStr = formatLocalTime(alert.resolvedAt, opts.utcOffsetHours);
     const durationSec = Math.max(0, alert.resolvedAt - alert.startedAt);
-    lines.push(
-      `resolved at *${resolvedStr} ${tzLabel}* (was firing for ${formatDuration(durationSec)})`,
-    );
+    lines.push([
+      { text: "resolved at " },
+      { text: `${resolvedStr} ${tzLabel}`, bold: true },
+      { text: ` (was firing for ${formatDuration(durationSec)})` },
+    ]);
   } else {
-    lines.push(`started at *${startedStr} ${tzLabel}*`);
+    lines.push([
+      { text: "started at " },
+      { text: `${startedStr} ${tzLabel}`, bold: true },
+    ]);
   }
   if (
     alert.severity === "critical" &&
     !isResolution &&
     typeof alert.meta.suggestedAction === "string"
   ) {
-    lines.push("");
-    lines.push(`> ${alert.meta.suggestedAction}`);
+    lines.push([]);
+    lines.push([{ text: `> ${alert.meta.suggestedAction}` }]);
   }
 
-  const textBody = lines.join("\n");
+  const textBody = lines
+    .map((segments) =>
+      segments.map((s) => (s.bold ? `*${s.text}*` : s.text)).join(""),
+    )
+    .join("\n");
+
+  // Telegram's HTML parse mode. Escaping happens on the raw text only, so an
+  // alert body containing `<` or `&` cannot break the markup — a real risk
+  // here, since detector messages carry things like "z=-4.2 < threshold".
+  const htmlBody = lines
+    .map((segments) =>
+      segments
+        .map((s) =>
+          s.bold ? `<b>${escapeHtml(s.text)}</b>` : escapeHtml(s.text),
+        )
+        .join(""),
+    )
+    .join("\n");
 
   const pushPayload: Record<string, unknown> = {
     id: alert.id,
@@ -94,6 +130,7 @@ export function renderAlert(
   };
 
   return {
+    htmlBody,
     id: alert.id,
     fingerprint: alert.fingerprint,
     monitor: alert.monitor,
@@ -117,4 +154,11 @@ function formatDuration(seconds: number): string {
   const hours = Math.floor(minutes / 60);
   const remaining = minutes % 60;
   return remaining ? `${hours}h ${remaining}m` : `${hours}h`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

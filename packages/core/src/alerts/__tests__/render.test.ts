@@ -102,3 +102,44 @@ describe("renderAlert — resolved uses recovery heading + duration", () => {
     expect(r2.textBody).not.toContain("Enable Under Attack Mode");
   });
 });
+
+describe("renderAlert — htmlBody for Telegram", () => {
+  const r = renderAlert(baseAlert, { utcOffsetHours: 7, timezoneLabel: "WIB" });
+
+  it("uses <b> tags and never leaks WhatsApp asterisks", () => {
+    expect(r.htmlBody).toContain("<b>🔴 CRITICAL — Traffic spike detected</b>");
+    expect(r.htmlBody).toContain("monitor: <b>example</b>");
+    expect(r.htmlBody).not.toContain("*");
+  });
+
+  it("carries the same information as textBody, only marked up differently", () => {
+    const strip = (s: string) =>
+      s.replace(/<\/?b>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+    expect(strip(r.htmlBody)).toBe(r.textBody.replace(/\*/g, ""));
+  });
+
+  it("escapes angle brackets and ampersands in the alert body", () => {
+    // Detector messages genuinely contain these — e.g. "z=-4.2 < -3.5" and
+    // "cache miss & volume spike". Unescaped, Telegram rejects the message.
+    const escaped = renderAlert(
+      {
+        ...baseAlert,
+        body: "z=-4.2 < -3.5 & cache miss <b>not a tag</b>",
+      },
+      { utcOffsetHours: 7 },
+    );
+    expect(escaped.htmlBody).toContain("z=-4.2 &lt; -3.5 &amp; cache miss");
+    expect(escaped.htmlBody).toContain("&lt;b&gt;not a tag&lt;/b&gt;");
+    // The only real <b> tags are the three the renderer adds itself:
+    // heading, monitor name, and the timestamp.
+    expect(escaped.htmlBody.match(/<b>/g)).toHaveLength(3);
+  });
+
+  it("escapes a title that contains markup too", () => {
+    const escaped = renderAlert(
+      { ...baseAlert, title: "5xx > 10%" },
+      { utcOffsetHours: 7 },
+    );
+    expect(escaped.htmlBody).toContain("5xx &gt; 10%");
+  });
+});

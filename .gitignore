@@ -31,3 +31,8 @@ tsconfig.tsbuildinfo
 
 # config
 config/monitors.json
+config/inilahcomg4-44e483263c9a.jso
+
+# credentials — service-account keys etc. Only *.example.json is tracked.
+config/*.json
+!config/*.example.json

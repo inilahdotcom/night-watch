@@ -19,6 +19,8 @@ export interface CommandHandlers {
   wa_relink: () => Promise<void>;
   snooze: (payload: unknown) => Promise<void>;
   unsnooze: (payload: unknown) => Promise<void>;
+  ack: (payload: unknown) => Promise<void>;
+  unack: (payload: unknown) => Promise<void>;
 }
 
 export interface OutboxPollOptions {
@@ -77,6 +79,12 @@ export async function pollAndExecute(opts: OutboxPollOptions): Promise<number> {
         case "unsnooze":
           await opts.handlers.unsnooze(payload);
           break;
+        case "ack":
+          await opts.handlers.ack(payload);
+          break;
+        case "unack":
+          await opts.handlers.unack(payload);
+          break;
         default: {
           const _exhaustive: never = kind;
           throw new Error(`unknown command kind: ${String(_exhaustive)}`);
@@ -109,7 +117,10 @@ export function enqueueCommand(
     .get(
       kind,
       payload ? JSON.stringify(payload) : null,
-      Date.now(),
+      // Seconds, like every other timestamp in the schema. This was
+      // milliseconds, which meant `sweepRetention`'s 30-day cutoff never
+      // matched and the commands table grew without bound.
+      Math.floor(Date.now() / 1000),
     ) as { id: number };
   return row.id;
 }
@@ -135,6 +146,10 @@ const SnoozePayloadSchema = z.object({
   reason: z.string().max(120).optional(),
 });
 const UnsnoozePayloadSchema = z.object({ scope: ScopeSchema });
+const AckPayloadSchema = z.object({
+  alertId: z.number().int().positive(),
+  by: z.string().max(60).optional(),
+});
 
 export function buildDefaultHandlers(ctx: HandlerContext): CommandHandlers {
   return {
@@ -178,6 +193,34 @@ export function buildDefaultHandlers(ctx: HandlerContext): CommandHandlers {
     async unsnooze(payload) {
       const parsed = UnsnoozePayloadSchema.parse(payload);
       clearSnooze(ctx.sqlite, parsed.scope as SnoozeScope);
+    },
+    async ack(payload) {
+      const parsed = AckPayloadSchema.parse(payload);
+      // Scoped to firing rows: acking a resolved alert is meaningless, and
+      // silently "succeeding" on one would hide a stale dashboard.
+      const res = ctx.sqlite
+        .prepare(
+          "UPDATE alerts SET acked_at = ?, acked_by = ? WHERE id = ? AND status = 'firing'",
+        )
+        .run(
+          Math.floor(Date.now() / 1000),
+          parsed.by ?? "dashboard",
+          parsed.alertId,
+        );
+      if (Number(res.changes) === 0) {
+        throw new Error(`no firing alert with id ${parsed.alertId}`);
+      }
+    },
+    async unack(payload) {
+      const parsed = AckPayloadSchema.parse(payload);
+      const res = ctx.sqlite
+        .prepare(
+          "UPDATE alerts SET acked_at = NULL, acked_by = NULL WHERE id = ? AND status = 'firing'",
+        )
+        .run(parsed.alertId);
+      if (Number(res.changes) === 0) {
+        throw new Error(`no firing alert with id ${parsed.alertId}`);
+      }
     },
   };
 }

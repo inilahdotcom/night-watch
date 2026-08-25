@@ -5,6 +5,7 @@ import { createLogger } from "../logger.ts";
 import { collectCloudflare } from "./cloudflare.ts";
 import { collectGA4 } from "./ga4.ts";
 import { checkControl, probe } from "./probe.ts";
+import { checkTls, tlsTargetFor } from "./tls.ts";
 import { applyProbeResult } from "../detectors/uptime.ts";
 import type { CollectorMetricRow } from "./index.ts";
 
@@ -18,6 +19,10 @@ import type { CollectorMetricRow } from "./index.ts";
 
 const log = createLogger("collect");
 
+// A certificate moves once every ~90 days; checking hourly is already
+// generous. See the TLS block in collectOne().
+const TLS_CHECK_INTERVAL_SECONDS = 3600;
+
 function alignBucket(ts: number, bucketSeconds: number): number {
   return Math.floor(ts / bucketSeconds) * bucketSeconds;
 }
@@ -25,6 +30,8 @@ function alignBucket(ts: number, bucketSeconds: number): number {
 export interface MonitorReport {
   monitor: string;
   probe?: { transition: string; latencyMs: number | null; reason: string | null };
+  content?: { bodyBytes: number; forbidHits: number };
+  tls?: { daysLeft: number | null; skipped: boolean; reason: string | null };
   cloudflare?: { rowCount: number; errors: number; maxSampleInterval: number };
   ga4?: { rowCount: number; errors: number };
   totalRowsWritten: number;
@@ -46,6 +53,7 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
     timeoutMs: monitor.probeTimeoutMs,
     expectStatusBelow: monitor.expectStatusBelow,
     expectText: monitor.expectText,
+    forbidText: monitor.forbidText,
   });
 
   // Sanity check per brief §5.4: if probe failed, verify our own outbound
@@ -97,8 +105,8 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
   sqlite
     .prepare(
       `INSERT INTO probe_state
-         (monitor, consecutive_fail, consecutive_ok, is_down, last_check_at, last_status, last_latency_ms, last_error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         (monitor, consecutive_fail, consecutive_ok, is_down, last_check_at, last_status, last_latency_ms, last_error, last_body_hash, last_body_bytes, last_forbid_hits)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(monitor) DO UPDATE SET
          consecutive_fail = excluded.consecutive_fail,
          consecutive_ok = excluded.consecutive_ok,
@@ -106,7 +114,10 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
          last_check_at = excluded.last_check_at,
          last_status = excluded.last_status,
          last_latency_ms = excluded.last_latency_ms,
-         last_error = excluded.last_error`,
+         last_error = excluded.last_error,
+         last_body_hash = COALESCE(excluded.last_body_hash, probe_state.last_body_hash),
+         last_body_bytes = COALESCE(excluded.last_body_bytes, probe_state.last_body_bytes),
+         last_forbid_hits = COALESCE(excluded.last_forbid_hits, probe_state.last_forbid_hits)`,
     )
     .run(
       monitor.id,
@@ -117,6 +128,11 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
       decision.status,
       decision.latencyMs,
       decision.failReason,
+      probeResult.content?.bodyHash ?? null,
+      probeResult.content?.bodyBytes ?? null,
+      probeResult.content
+        ? JSON.stringify(probeResult.content.forbidHits)
+        : null,
     );
 
   report.probe = {
@@ -124,6 +140,12 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
     latencyMs: decision.latencyMs,
     reason: decision.failReason,
   };
+  if (probeResult.content) {
+    report.content = {
+      bodyBytes: probeResult.content.bodyBytes,
+      forbidHits: probeResult.content.forbidHits.length,
+    };
+  }
 
   // Emit latency + up metrics per bucket (aligned to configured bucketSeconds).
   const bucketTs = alignBucket(now, monitor.bucketSeconds);
@@ -141,6 +163,74 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
     bucketTs,
     value: decision.next.isDown ? 0 : 1,
   });
+  // Only when we actually got a body. Writing 0 for a connection failure
+  // would poison the size baseline with values that mean "no response",
+  // not "empty page".
+  if (probeResult.content) {
+    rows.push({
+      monitor: monitor.id,
+      source: "probe",
+      metric: "body_bytes",
+      bucketTs,
+      value: probeResult.content.bodyBytes,
+    });
+  }
+
+  // ----- tls certificate ----------------------------------------------
+  //
+  // Rate-limited to once an hour per monitor. A certificate does not change
+  // between two ticks, and a real TLS handshake every 60s per monitor would
+  // be 1440 needless handshakes a day for a number that moves once every
+  // 90 days.
+  const tlsTarget = tlsTargetFor(monitor.url);
+  if (tlsTarget) {
+    const stateKey = `tls:${monitor.id}`;
+    const lastRow = sqlite
+      .prepare("SELECT value FROM system_state WHERE key = ?")
+      .get(stateKey) as { value: string } | undefined;
+    let lastCheckedAt = 0;
+    if (lastRow?.value) {
+      try {
+        lastCheckedAt = (JSON.parse(lastRow.value) as { checkedAt?: number })
+          .checkedAt ?? 0;
+      } catch {
+        lastCheckedAt = 0;
+      }
+    }
+
+    if (now - lastCheckedAt < TLS_CHECK_INTERVAL_SECONDS) {
+      report.tls = { daysLeft: null, skipped: true, reason: null };
+    } else {
+      const tls = await checkTls(tlsTarget.hostname, tlsTarget.port, {
+        timeoutMs: monitor.probeTimeoutMs,
+      });
+      if (tls.kind === "ok") {
+        rows.push({
+          monitor: monitor.id,
+          source: "probe",
+          metric: "tls_days_left",
+          bucketTs,
+          value: tls.daysLeft,
+        });
+        report.tls = { daysLeft: tls.daysLeft, skipped: false, reason: null };
+      } else {
+        // A failed TLS read is not a failed site — the HTTP probe above is
+        // the authority on reachability. Record the reason and move on
+        // rather than writing a misleading metric value.
+        report.tls = { daysLeft: null, skipped: false, reason: tls.reason };
+        log.warn(
+          { monitor: monitor.id, reason: tls.reason },
+          "tls check failed",
+        );
+      }
+      sqlite
+        .prepare(
+          `INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(stateKey, JSON.stringify({ checkedAt: now }), now);
+    }
+  }
 
   // ----- cloudflare ---------------------------------------------------
   if (monitor.cloudflareZoneId) {
@@ -252,6 +342,16 @@ async function main(): Promise<void> {
     if (r.probe) {
       console.log(
         `  probe:      ${r.probe.transition}  latency=${r.probe.latencyMs ?? "-"}ms  ${r.probe.reason ? "reason=" + r.probe.reason : ""}`,
+      );
+    }
+    if (r.content) {
+      console.log(
+        `  content:    ${r.content.bodyBytes} bytes  forbidden hits=${r.content.forbidHits}`,
+      );
+    }
+    if (r.tls) {
+      console.log(
+        `  tls:        ${r.tls.skipped ? "skipped (checked within the hour)" : r.tls.reason ? "failed: " + r.tls.reason : r.tls.daysLeft + " days left"}`,
       );
     }
     if (r.cloudflare) {

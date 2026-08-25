@@ -1,10 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, redirect } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import {
   fetchActiveAlerts,
   fetchAlertHistory,
   fetchMonitors,
+  fetchRecentAlertCount,
   fetchSnoozes,
   fetchStatus,
   fetchSystemHealth,
@@ -16,8 +17,18 @@ import { MonitorCard } from "../components/monitor-card";
 import { SubscribeButton } from "../components/subscribe-button";
 import { SnoozeControls } from "../components/snooze-controls";
 import { Loader } from "../components/ui/loader";
+import { fetchAuthState } from "../lib/auth-fns";
 
-export const Route = createFileRoute("/")({ component: DashboardPage });
+export const Route = createFileRoute("/")({
+  // Cosmetic: the real gate is `authMiddleware` on every server function in
+  // lib/server-fns.ts. This just spares an authenticated-looking shell that
+  // would only render 401s.
+  beforeLoad: async () => {
+    const state = await fetchAuthState();
+    if (state.enabled && !state.authed) throw redirect({ to: "/login" });
+  },
+  component: DashboardPage,
+});
 
 // Dashboard: single-page layout ordered per brief §7.
 //   1) Verdict — one big statement + pulsing indicator
@@ -58,6 +69,10 @@ function DashboardBody() {
   const monitors = useQuery({ queryKey: ["monitors"], queryFn: () => fetchMonitors() });
   const system = useQuery({ queryKey: ["system"], queryFn: () => fetchSystemHealth() });
   const snoozes = useQuery({ queryKey: ["snoozes"], queryFn: () => fetchSnoozes() });
+  const recent = useQuery({
+    queryKey: ["recent-alert-count"],
+    queryFn: () => fetchRecentAlertCount(),
+  });
 
   // Show the full-page loader only on the very first fetch of the primary
   // data. Once we have snapshots, subsequent refetches are silent so the
@@ -96,9 +111,18 @@ function DashboardBody() {
       <ActiveAlerts alerts={active.data} />
 
       <section aria-labelledby="monitors-heading" className="mt-10">
-        <h2 id="monitors-heading" className="text-2xl mb-3">
-          Monitors
-        </h2>
+        <div className="mb-3 flex items-baseline justify-between gap-4">
+          <h2 id="monitors-heading" className="text-2xl">
+            Monitors
+          </h2>
+          {recent.data && (
+            <span className="mono text-xs text-muted-foreground">
+              {recent.data.count === 0
+                ? `no alerts in ${recent.data.hours}h`
+                : `${recent.data.count} alert${recent.data.count === 1 ? "" : "s"} in ${recent.data.hours}h`}
+            </span>
+          )}
+        </div>
         {monitors.data && monitors.data.length === 0 ? (
           <div className="rounded-2xl border border-border bg-card px-6 py-8 text-center text-muted-foreground">
             No monitors have reported yet. Check <code className="mono">config/monitors.json</code> and

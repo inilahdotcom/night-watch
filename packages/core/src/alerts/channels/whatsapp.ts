@@ -149,6 +149,8 @@ export function createWhatsAppChannel(
 
   return {
     name: "whatsapp",
+    // A group message buzzes every phone in it.
+    mutedByQuietHours: true,
     isReady(): boolean {
       // Connected OR queueing — both count as "we'll get this out eventually",
       // unless we're logged out (which requires human intervention).

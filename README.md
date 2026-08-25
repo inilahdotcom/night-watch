@@ -233,6 +233,19 @@ container pair itself — it has `tty: true`, so the QR renders in
 
 If the pairing ever gets revoked (`DisconnectReason.loggedOut`), the worker writes `wa:needs-relink` into `system_state` and the dashboard shows a banner. Restart the worker after clearing the auth folder to re-pair.
 
+## Connecting Telegram (optional, recommended)
+
+WhatsApp here runs on Baileys — an unofficial client on a session Meta can invalidate at any time. When that happens the primary alert path dies quietly, and you find out by not being told about an outage. Telegram costs one env pair and removes that single point of failure.
+
+1. Message [@BotFather](https://t.me/BotFather), `/newbot`, keep the token.
+2. Add the bot to your group (and make it an admin if the group restricts posting).
+3. Send any message in the group, then read the chat id from `https://api.telegram.org/bot<TOKEN>/getUpdates`. Group ids are negative.
+4. Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, restart the worker, run `bun run alert:test`.
+
+Telegram follows the same rules as WhatsApp: muted by quiet hours for non-critical alerts, always breaks through for criticals. Firing criticals arrive with sound; warnings and recoveries arrive silently.
+
+It receives `htmlBody` rather than the WhatsApp text — `*bold*` would show up as literal asterisks there — and every alert body is HTML-escaped, which matters because detector messages routinely contain `<`, `>` and `&`.
+
 ## Setting up browser push (VAPID)
 
 1. Generate a keypair once, per deployment:
@@ -354,9 +367,78 @@ Recovery from a DDoS alert requires **3 consecutive clean buckets** before the a
 
 `resolveAlert(fingerprint, …)` closes the alert and (if `ALERT_NOTIFY_ON_RESOLVE`) sends a recovery message to the **same channels** that received the original — so the people notified when it broke are also notified when it clears.
 
-### 8. Quiet hours
+### 8. Acknowledgement
+
+A firing critical re-notifies every `ALERT_COOLDOWN_MINUTES` until it resolves. Acknowledging it (button on the dashboard) stops the nagging without pretending the problem is gone.
+
+Two rules the implementation is careful about:
+
+- **Escalation always breaks through an acknowledgement.** Acking a warning must never silence its promotion to critical — that would turn "I've seen this" into "never tell me about this again", which is the opposite of what the button means.
+- **Escalation clears the acknowledgement.** A warning someone accepted is not the same alert once it becomes critical, so it has to be seen and acked again.
+
+The ack travels through the `commands` outbox like every other dashboard write, so the worker remains the only process that writes to `alerts` and `mutations.ts` stays as narrow as it was.
+
+### 9. Delivery log
+
+Every notification attempt has always been recorded in `deliveries` — and until now, read by nobody. Each firing alert on the dashboard shows a chip per channel (`✓ push`, `✗ whatsapp · session logged out`, `– whatsapp · quiet hours`), and the history flags rows whose delivery failed.
+
+`skipped` is styled neutrally on purpose: a channel muted by quiet hours or a maintenance window did exactly what it was configured to do. Colouring that as a failure would train people to ignore the colour.
+
+### 10. Quiet hours
 
 `quietHours: "22:00-07:00"` mutes WhatsApp for non-critical alerts. Push notifications always fire — they're silent by default so they don't wake you unnecessarily. **Critical alerts break through quiet hours** on WhatsApp too. A site being down at 3am still buzzes.
+
+### 11. Baselines beyond `cf_requests`
+
+`gatherBaseline`, `evaluateTraffic` and `confirmConsecutive` were always pure and metric-agnostic; only a caller was missing. Any of these can now be baselined per monitor:
+
+```json
+"baselines": {
+  "ga_active_users": { "direction": "drop", "severity": "critical" },
+  "latency_ms":      { "direction": "spike" }
+}
+```
+
+- **`ga_active_users` dropping** is the sharpest gap this closes. When the CDN is healthy but the page is broken in the browser — bad deploy, JS error, misfiring paywall — Cloudflare still sees normal request volume while GA4 watches the humans disappear. No other detector here can see that.
+- **`latency_ms` rising** replaces a flat 3000ms threshold with a z-score. A site that normally answers in 200ms and now takes 1200ms is in trouble, and the flat threshold says nothing.
+
+Three things the implementation is deliberate about:
+
+- **Off unless configured.** These add new alert sources; enabling them silently would change what a quiet dashboard means for every existing install, and would quietly invalidate `bun run db:demo` as a regression harness.
+- **Guards are per-metric.** `minBaseline: 50` is sensible for request counts and meaningless for milliseconds, so it defaults to `0` here rather than inheriting the monitor's value. Override `spikeZ`, `minBaseline`, `minRelativeChange` and `consecutiveBuckets` per metric.
+- **Direction is filtered at the call site.** A GA4 *spike* is good news and a latency *drop* is good news. Only the detector's caller knows that, so `direction` is `"drop"`, `"spike"` or `"both"`.
+
+### 12. Content integrity
+
+The failure mode this exists for: the site returns 200, responds fast, serves normal traffic, and has been quietly injected with spam SEO markup. **Every other detector reports it as healthy**, because by every signal they measure, it is. For an Indonesian news portal this is the most common and most expensive way to be compromised, and until now it was completely invisible here.
+
+Two independent checks, weighted very differently:
+
+- **`forbidText` hits → critical.** A term from your own blocklist appearing in the page is not a statistical judgement; it is a fact, and it means someone else is writing to your site. Matching is case-insensitive. Keep the list specific — one hit pages someone.
+- **Body size → warning.** Median+MAD against the `body_bytes` history, catching blank and truncated pages that still answer 200. It needs **both** a z-guard and `minRelativeChange`, for the same reason `evaluateTraffic` has three gates: HTML byte size is so self-consistent that an ordinary 3% swing scores z > 4. The z-score says "unusual for this page"; the relative gate says "and also broken rather than just a new headline".
+
+Both come free of network cost. The probe already reads and drains the response body for `expectText`, so hashing and scanning it is pure CPU on bytes already in hand.
+
+**What this deliberately does not do** is alert on the body hash changing. A news portal's HTML changes every minute; hash-change alerting would fire continuously and be muted inside a week, taking the useful checks with it. The hash is stored in `probe_state.last_body_hash` for forensics, not for triggering.
+
+### 13. TLS certificate expiry
+
+A separate TLS connection reads the peer certificate and stores `tls_days_left`. Warning at `certWarnDays` (14), critical at `certCritDays` (3), and always critical once expired regardless of how the thresholds are tuned.
+
+Two implementation notes that matter operationally:
+
+- The handshake runs **at most once an hour per monitor**, not every tick. A certificate moves once every ~90 days; 1440 handshakes a day would buy nothing.
+- The connection sets `rejectUnauthorized: false` **on purpose**. An expired or self-signed certificate is precisely the condition being reported, and refusing the handshake would discard the `notAfter` date. No request is sent and no response body is read on that socket.
+
+A failed TLS read is never treated as the site being down — the HTTP probe stays the authority on reachability.
+
+### 14. Uptime percentage — and what it is accurate to
+
+The uptime figures on each monitor card (24h / 7d / 30d) are the mean of the stored `up` metric over that window.
+
+One caveat worth knowing before quoting the number at anyone: the probe runs every minute, but `up` is upserted into a `bucketSeconds` bucket (300s by default), so the last write in a bucket wins. Each sample therefore represents the **final minute of its bucket**, not an average of the five. A two-minute outage that starts and ends inside one bucket can be missed entirely.
+
+That is why the card prints the sample count next to every figure, and why it drops to whole percent below a day's worth of samples. `100%` means "no failed sample", not "provably zero downtime".
 
 ## Tunable parameters
 
@@ -380,6 +462,10 @@ Every per-monitor detector setting has a sensible default. Override any of them 
 | `recoverThreshold`   | 2       | Probes-in-a-row before back UP                     | Raise to avoid flapping.                                               |
 | `slowResponseMs`     | 3000    | Latency threshold for slow warning                 | Match your SLA target.                                                 |
 | `probeTimeoutMs`     | 10000   | HTTP fetch timeout                                 | Raise for slow APIs you monitor.                                       |
+| `certWarnDays`       | 14      | Days of TLS cert life left before a warning        | Raise if your renewal process needs more lead time.                    |
+| `certCritDays`       | 3       | Days left before the cert alert goes critical      | Raise if nobody is on call at short notice.                            |
+| `forbidText`         | `[]`    | Terms that must never appear in the page body      | Add the spam keywords your sector gets injected with. One hit = critical. |
+| `baselines`          | `{}`    | Extra metrics to baseline (GA4 users, latency, bytes) | Turn on `ga_active_users` drop detection once you have a week of GA4 history. |
 
 Global settings (top-level in `monitors.json`, not per-monitor):
 
@@ -408,6 +494,27 @@ The seed plants five injections in the last 24h (a real spike, a full DDoS patte
 
 It exits non-zero on any false positive/negative. Use it as a smoke test after touching detector code.
 
+## Tuning thresholds against your own data
+
+`bun run db:demo` proves the detectors behave on synthetic data with planted anomalies. `detect:backtest` is its counterpart for real data, where nobody knows the right answer in advance and the useful question is "how many alerts, and when".
+
+```bash
+# What the current config would have fired over the last 4 weeks
+bun run detect:backtest -- --monitor=inilahcom --weeks=4
+
+# Sweep a parameter and compare
+bun run detect:backtest -- --monitor=inilahcom --weeks=6 --compare=spikeZ:3.0,3.5,4.5
+```
+
+It replays the stored metrics through the real detectors with candidate parameters. **Strictly read-only** — no engine, no channels, no writes — so it is safe to run against production while the worker is running.
+
+Two details that make its numbers trustworthy:
+
+- It counts **one hit per incident, not one per bucket**. The alert engine is idempotent, so a two-hour incident sends one message; a backtest counting all 24 elevated buckets would overstate the noise by an order of magnitude.
+- It reports how many buckets it **could not judge** (baseline too thin) alongside how many it did. "0 alerts" over 36 judged buckets and "0 alerts" over 12,000 are very different claims.
+
+A monitor id that exists in the metrics table but not in `monitors.json` — `seed-demo`, or a monitor you removed — is backtested against schema defaults, and the output says so.
+
 ## Environment reference
 
 All variables are optional; the app is honest about what it can and can't do based on what's set.
@@ -424,9 +531,13 @@ All variables are optional; the app is honest about what it can and can't do bas
 | `VAPID_SUBJECT`                         | `mailto:admin@example.com` | Contact URL/email required by the Web Push spec.                                       |
 | `WA_GROUP_JID`                          | (unset)                    | WhatsApp group JID (`120…@g.us`). Required for WhatsApp channel.                       |
 | `WA_AUTH_DIR`                           | `./apps/worker/auth_wa`    | Where Baileys persists its pairing state. Docker default: `/data/auth_wa`.             |
+| `TELEGRAM_BOT_TOKEN`                    | (unset)                    | Bot token from @BotFather. Both this and the chat id are needed for Telegram.          |
+| `TELEGRAM_CHAT_ID`                      | (unset)                    | Target chat. Group ids are negative, e.g. `-1001234567890`.                            |
 | `ALERT_COOLDOWN_MINUTES`                | 15                         | Minimum minutes between re-notifications of the same firing critical.                  |
 | `ALERT_NOTIFY_ON_RESOLVE`               | `true`                     | Send a recovery message when an alert clears.                                          |
 | `WEB_PORT`                              | 3011                       | Host port the dashboard container maps to (container listens on 3011 internally).      |
+| `DASHBOARD_PASSWORD`                    | (unset)                    | Set to require a password for the dashboard. Unset = open to anyone who can reach it.  |
+| `SESSION_SECRET`                        | (unset)                    | ≥32 chars, seals the session cookie. Required whenever `DASHBOARD_PASSWORD` is set.    |
 
 ## Licenses
 

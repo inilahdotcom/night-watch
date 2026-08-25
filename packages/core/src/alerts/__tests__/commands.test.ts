@@ -1,25 +1,16 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it, mock } from "bun:test";
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 import {
   enqueueCommand,
+  buildDefaultHandlers,
   pollAndExecute,
   type CommandHandlers,
 } from "../commands.ts";
 
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
-
 function newDb(): Database {
   const sqlite = new Database(":memory:");
-  sqlite.exec(readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8"));
+  applyAllMigrations(sqlite);
   return sqlite;
 }
 
@@ -29,6 +20,8 @@ function stubHandlers(overrides?: Partial<CommandHandlers>): CommandHandlers {
     wa_relink: mock(async () => {}),
     snooze: mock(async () => {}),
     unsnooze: mock(async () => {}),
+    ack: mock(async () => {}),
+    unack: mock(async () => {}),
     ...overrides,
   };
 }
@@ -128,5 +121,84 @@ describe("pollAndExecute", () => {
       durationMinutes: 15,
     });
     expect(handlers.unsnooze).toHaveBeenCalledWith({ scope: "global" });
+  });
+});
+
+describe("ack / unack handlers", () => {
+  function seedFiringAlert(sqlite: Database): number {
+    const row = sqlite
+      .prepare(
+        `INSERT INTO alerts (fingerprint, monitor, type, severity, status, title, body, started_at, notify_count)
+         VALUES ('m:traffic:spike', 'm', 'traffic', 'critical', 'firing', 't', 'b', 1000, 1)
+         RETURNING id`,
+      )
+      .get() as { id: number };
+    return row.id;
+  }
+
+  function handlers(sqlite: Database) {
+    return buildDefaultHandlers({
+      engine: {
+        raiseAlert: async () => ({ alertId: 1, action: "created", channelResults: [] }),
+        resolveAlert: async () => ({ alertId: 1, action: "resolved", channelResults: [] }),
+      },
+      sqlite,
+    });
+  }
+
+  it("stamps acked_at and acked_by on a firing alert", async () => {
+    const sqlite = newDb();
+    const id = seedFiringAlert(sqlite);
+    await handlers(sqlite).ack({ alertId: id, by: "alvin" });
+
+    const row = sqlite
+      .prepare("SELECT acked_at, acked_by FROM alerts WHERE id = ?")
+      .get(id) as { acked_at: number | null; acked_by: string | null };
+    expect(row.acked_at).toBeGreaterThan(0);
+    expect(row.acked_by).toBe("alvin");
+  });
+
+  it("defaults the actor when none is supplied", async () => {
+    const sqlite = newDb();
+    const id = seedFiringAlert(sqlite);
+    await handlers(sqlite).ack({ alertId: id });
+    const row = sqlite.prepare("SELECT acked_by FROM alerts WHERE id = ?").get(id) as {
+      acked_by: string;
+    };
+    expect(row.acked_by).toBe("dashboard");
+  });
+
+  it("unack clears the stamp", async () => {
+    const sqlite = newDb();
+    const id = seedFiringAlert(sqlite);
+    await handlers(sqlite).ack({ alertId: id });
+    await handlers(sqlite).unack({ alertId: id });
+    const row = sqlite
+      .prepare("SELECT acked_at, acked_by FROM alerts WHERE id = ?")
+      .get(id) as { acked_at: number | null; acked_by: string | null };
+    expect(row.acked_at).toBeNull();
+    expect(row.acked_by).toBeNull();
+  });
+
+  it("refuses to ack a resolved alert rather than silently succeeding", async () => {
+    const sqlite = newDb();
+    const id = seedFiringAlert(sqlite);
+    sqlite.prepare("UPDATE alerts SET status = 'resolved' WHERE id = ?").run(id);
+    await expect(handlers(sqlite).ack({ alertId: id })).rejects.toThrow(
+      /no firing alert/,
+    );
+  });
+
+  it("refuses an unknown alert id", async () => {
+    const sqlite = newDb();
+    await expect(handlers(sqlite).ack({ alertId: 9999 })).rejects.toThrow(
+      /no firing alert/,
+    );
+  });
+
+  it("rejects a malformed payload", async () => {
+    const sqlite = newDb();
+    await expect(handlers(sqlite).ack({ alertId: -1 })).rejects.toThrow();
+    await expect(handlers(sqlite).ack({})).rejects.toThrow();
   });
 });

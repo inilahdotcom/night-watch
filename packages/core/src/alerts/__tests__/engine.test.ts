@@ -1,12 +1,10 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "bun:test";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "../../db/schema.ts";
 import { createAlertEngine } from "../engine.ts";
 import { parseQuietHours } from "../quiet-hours.ts";
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 import type {
   DeliveryResult,
   NotificationChannel,
@@ -17,6 +15,7 @@ import type {
 // readiness and force failures without any real network I/O.
 class MemoryChannel implements NotificationChannel {
   readonly name = "push" as const;
+  readonly mutedByQuietHours = false;
   ready = true;
   responder: (a: RenderedAlert) => DeliveryResult = () => ({
     ok: true,
@@ -36,6 +35,7 @@ class MemoryChannel implements NotificationChannel {
 
 class MemoryWhatsApp implements NotificationChannel {
   readonly name = "whatsapp" as const;
+  readonly mutedByQuietHours = true;
   ready = true;
   sends: RenderedAlert[] = [];
   isReady(): boolean {
@@ -48,19 +48,10 @@ class MemoryWhatsApp implements NotificationChannel {
 }
 
 // Load the schema by executing the init migration into an in-memory DB.
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
-
 function newDb() {
   const sqlite = new Database(":memory:");
   sqlite.exec("PRAGMA foreign_keys = ON;");
-  const sql = readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8");
-  sqlite.exec(sql);
+  applyAllMigrations(sqlite);
   const db = drizzle(sqlite, { schema });
   return { sqlite, db };
 }
@@ -384,5 +375,72 @@ describe("engine — channel readiness and cleanup", () => {
       .prepare("SELECT COUNT(*) as n FROM push_subscriptions")
       .get() as { n: number };
     expect(remaining.n).toBe(0);
+  });
+});
+
+describe("acknowledgement", () => {
+  function ack(sqlite: Database, alertId: number, by = "tester"): void {
+    sqlite
+      .prepare("UPDATE alerts SET acked_at = ?, acked_by = ? WHERE id = ?")
+      .run(fakeNow(), by, alertId);
+  }
+
+  const CRITICAL = { ...BASE_INPUT, severity: "critical" as const };
+
+  it("suppresses the cooldown re-notify once acknowledged", async () => {
+    const push = new MemoryChannel();
+    const { engine, sqlite } = engineWith([push], { cooldownMinutes: 15 });
+    const first = await engine.raiseAlert(CRITICAL);
+    expect(push.sends).toHaveLength(1);
+
+    ack(sqlite, first.alertId!);
+
+    // An hour later — well past the cooldown. Without the ack this notifies.
+    clockOffset = 3600;
+    const again = await engine.raiseAlert(CRITICAL);
+    expect(again.action).toBe("updated-silent");
+    expect(push.sends).toHaveLength(1);
+  });
+
+  it("still re-notifies after cooldown when NOT acknowledged", async () => {
+    const push = new MemoryChannel();
+    const { engine } = engineWith([push], { cooldownMinutes: 15 });
+    await engine.raiseAlert(CRITICAL);
+
+    clockOffset = 3600;
+    const again = await engine.raiseAlert(CRITICAL);
+    expect(again.action).toBe("updated-notified");
+    expect(push.sends).toHaveLength(2);
+  });
+
+  it("lets escalation break through an acknowledgement", async () => {
+    const push = new MemoryChannel();
+    const { engine, sqlite } = engineWith([push]);
+    const first = await engine.raiseAlert(BASE_INPUT); // warning
+    expect(push.sends).toHaveLength(1);
+
+    ack(sqlite, first.alertId!);
+
+    // Acking a warning must never silence its promotion to critical.
+    const escalated = await engine.raiseAlert(CRITICAL);
+    expect(escalated.action).toBe("escalated");
+    expect(push.sends).toHaveLength(2);
+  });
+
+  it("clears the acknowledgement on escalation so the new severity must be acked again", async () => {
+    const push = new MemoryChannel();
+    const { engine, sqlite } = engineWith([push]);
+    const first = await engine.raiseAlert(BASE_INPUT);
+    ack(sqlite, first.alertId!);
+    await engine.raiseAlert(CRITICAL);
+
+    const row = sqlite
+      .prepare("SELECT acked_at, acked_by FROM alerts WHERE id = ?")
+      .get(first.alertId!) as {
+      acked_at: number | null;
+      acked_by: string | null;
+    };
+    expect(row.acked_at).toBeNull();
+    expect(row.acked_by).toBeNull();
   });
 });

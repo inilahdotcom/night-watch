@@ -20,7 +20,9 @@ export type MetricName =
   | "ga_active_users"
   | "ga_page_views"
   | "latency_ms"
-  | "up";
+  | "up"
+  | "tls_days_left"
+  | "body_bytes";
 
 export const METRIC_NAMES = [
   "cf_requests",
@@ -34,16 +36,30 @@ export const METRIC_NAMES = [
   "ga_page_views",
   "latency_ms",
   "up",
+  "tls_days_left",
+  "body_bytes",
 ] as const satisfies readonly MetricName[];
 
 export type MetricSource = "cloudflare" | "ga4" | "probe" | "internal";
 export type AlertSeverity = "critical" | "warning" | "info";
 export type AlertStatus = "firing" | "resolved";
-export type AlertType = "traffic" | "uptime" | "ddos" | "latency";
-export type Channel = "push" | "whatsapp";
+export type AlertType =
+  | "traffic"
+  | "uptime"
+  | "ddos"
+  | "latency"
+  | "cert"
+  | "content";
+export type Channel = "push" | "whatsapp" | "telegram";
 export type DeliveryStatus = "sent" | "failed" | "skipped";
 export type CommandStatus = "pending" | "done" | "failed";
-export type CommandKind = "test_alert" | "wa_relink" | "snooze" | "unsnooze";
+export type CommandKind =
+  | "test_alert"
+  | "wa_relink"
+  | "snooze"
+  | "unsnooze"
+  | "ack"
+  | "unack";
 
 // Time-series metrics. The composite PK + WITHOUT ROWID (declared in the initial
 // migration) is what makes upserts idempotent and storage compact.
@@ -80,6 +96,8 @@ export const alerts = sqliteTable(
     startedAt: integer("started_at").notNull(),
     lastNotifiedAt: integer("last_notified_at"),
     notifyCount: integer("notify_count").notNull().default(0),
+    ackedAt: integer("acked_at"),
+    ackedBy: text("acked_by"),
     resolvedAt: integer("resolved_at"),
   },
   (t) => [
@@ -110,6 +128,9 @@ export const probeState = sqliteTable("probe_state", {
   lastStatus: integer("last_status"),
   lastLatencyMs: integer("last_latency_ms"),
   lastError: text("last_error"),
+  lastBodyHash: text("last_body_hash"),
+  lastBodyBytes: integer("last_body_bytes"),
+  lastForbidHits: text("last_forbid_hits", { mode: "json" }).$type<string[]>(),
 });
 
 export const deliveries = sqliteTable(

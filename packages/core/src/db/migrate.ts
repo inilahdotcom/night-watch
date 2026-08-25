@@ -1,13 +1,9 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { loadEnv } from "../config/env.ts";
 import { createLogger } from "../logger.ts";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-// packages/core/src/db/migrate.ts → packages/core/migrations
-const MIGRATIONS_DIR = join(HERE, "..", "..", "migrations");
+import { MIGRATIONS_DIR, migrationFiles } from "./schema-sql.ts";
 
 function main(): void {
   const env = loadEnv();
@@ -28,9 +24,7 @@ function main(): void {
     );
   `);
 
-  const files = readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
+  const files = migrationFiles();
 
   const appliedRows = sqlite
     .prepare("SELECT name FROM _migrations")

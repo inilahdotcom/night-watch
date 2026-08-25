@@ -79,6 +79,9 @@ export function createPushChannel(opts: PushChannelOptions): NotificationChannel
 
   return {
     name: "push",
+    // Push notifications are silent by default, so there is nothing for quiet
+    // hours to protect anyone from.
+    mutedByQuietHours: false,
     isReady(): boolean {
       return hasKeys;
     },

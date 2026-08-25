@@ -1,14 +1,16 @@
 import type { Database } from "bun:sqlite";
 import type { AlertEngine } from "../alerts/engine.ts";
 import type { Monitor } from "../config/monitors.ts";
+import type { MetricName } from "../db/schema.ts";
 import {
   confirmConsecutive,
+  evaluateCert,
+  evaluateContent,
   evaluateDDoS,
   evaluateTraffic,
   gatherBaseline,
-  type HistoricalPoint,
-  type TrafficAnomaly,
 } from "../detectors/index.ts";
+import type { HistoricalPoint, TrafficAnomaly } from "../detectors/index.ts";
 import { createLogger } from "../logger.ts";
 
 // One analysis cycle per monitor. Reads the most-recent mature buckets from
@@ -25,8 +27,25 @@ import { createLogger } from "../logger.ts";
 //   <monitor>:ddos
 //   <monitor>:uptime
 //   <monitor>:slow
+//   <monitor>:cert
+//   <monitor>:content:forbidden
+//   <monitor>:content:size
+//   <monitor>:baseline:<metric>
 
 const log = createLogger("analysis");
+
+// Human names for the extra baselined metrics — these end up in WhatsApp
+// messages, where "ga_active_users drop" reads worse than "active users drop".
+const METRIC_LABELS: Partial<Record<MetricName, string>> = {
+  ga_active_users: "active users",
+  ga_page_views: "page views",
+  latency_ms: "latency",
+  cf_bytes: "bandwidth",
+};
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
 
 interface HistoryRow {
   bucket_ts: number;
@@ -47,6 +66,8 @@ interface ProbeStateRow {
   last_status: number | null;
   last_latency_ms: number | null;
   last_error: string | null;
+  last_body_bytes: number | null;
+  last_forbid_hits: string | null;
 }
 
 /** Serialised per-monitor state kept in system_state so cycles across
@@ -55,6 +76,12 @@ export interface MonitorAnalysisState {
   recentTraffic: TrafficAnomaly[];
   cleanDDoSStreak: number;
   cleanSlowStreak: number;
+  /**
+   * Consecutive-bucket history for the extra baselined metrics, keyed by
+   * metric name. Absent on state written before those existed, which is why
+   * every read defaults it — a worker restart after an upgrade must not throw.
+   */
+  recentByMetric?: Record<string, TrafficAnomaly[]>;
 }
 
 const STATE_KEY_PREFIX = "analysis:";
@@ -120,9 +147,10 @@ export function lastEvaluableBucket(
  * analysis cycle leaves it open (retention is the only limit), while the web
  * read caps it at the few weeks the seasonal baseline can actually reach.
  */
-export function loadRequestsHistory(
+export function loadMetricHistory(
   sqlite: Database,
   monitor: string,
+  metric: MetricName,
   beforeTs: number,
   sinceTs?: number,
 ): HistoricalPoint[] {
@@ -131,20 +159,35 @@ export function loadRequestsHistory(
       ? (sqlite
           .prepare(
             `SELECT bucket_ts, value FROM metrics
-              WHERE monitor = ? AND source = 'cloudflare' AND metric = 'cf_requests'
+              WHERE monitor = ? AND metric = ?
                 AND bucket_ts < ?
               ORDER BY bucket_ts ASC`,
           )
-          .all(monitor, beforeTs) as HistoryRow[])
+          .all(monitor, metric, beforeTs) as HistoryRow[])
       : (sqlite
           .prepare(
             `SELECT bucket_ts, value FROM metrics
-              WHERE monitor = ? AND source = 'cloudflare' AND metric = 'cf_requests'
+              WHERE monitor = ? AND metric = ?
                 AND bucket_ts < ? AND bucket_ts >= ?
               ORDER BY bucket_ts ASC`,
           )
-          .all(monitor, beforeTs, sinceTs) as HistoryRow[]);
+          .all(monitor, metric, beforeTs, sinceTs) as HistoryRow[]);
   return rows.map((r) => ({ bucketTs: r.bucket_ts, value: r.value }));
+}
+
+/**
+ * Kept as a thin wrapper rather than replaced at every call site: `getPulse`
+ * in the web layer calls this to draw the very same baseline the traffic
+ * detector uses, and that alignment is the whole reason a coloured bar on the
+ * chart means what a WhatsApp message means.
+ */
+export function loadRequestsHistory(
+  sqlite: Database,
+  monitor: string,
+  beforeTs: number,
+  sinceTs?: number,
+): HistoricalPoint[] {
+  return loadMetricHistory(sqlite, monitor, "cf_requests", beforeTs, sinceTs);
 }
 
 function loadCurrentSnapshot(
@@ -176,10 +219,30 @@ function loadProbeState(
 ): ProbeStateRow | null {
   const row = sqlite
     .prepare(
-      "SELECT is_down, last_status, last_latency_ms, last_error FROM probe_state WHERE monitor = ?",
+      `SELECT is_down, last_status, last_latency_ms, last_error,
+              last_body_bytes, last_forbid_hits
+         FROM probe_state WHERE monitor = ?`,
     )
     .get(monitor) as ProbeStateRow | undefined;
   return row ?? null;
+}
+
+/**
+ * `last_forbid_hits` is written as a JSON array by the collector. A corrupt or
+ * legacy value must not take the whole cycle down — an unreadable hit list is
+ * treated as "no hits", which is the same state a monitor with no blocklist is
+ * in, and the next probe overwrites it.
+ */
+function parseForbidHits(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((x): x is string => typeof x === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export interface AnalysisCycleOptions {
@@ -274,6 +337,206 @@ export async function runAnalysisCycle(
       }
     }
   }
+
+  // ---------------------------------------------------------------
+  // TLS certificate expiry — probe-driven, so it must run before the
+  // Cloudflare early-return below. A monitor with no CF zone still has a
+  // certificate, and that is exactly the monitor most likely to have nobody
+  // watching its renewal.
+  // ---------------------------------------------------------------
+  const certFp = `${monitor.id}:cert`;
+  const certRow = sqlite
+    .prepare(
+      `SELECT value FROM metrics
+         WHERE monitor = ? AND metric = 'tls_days_left'
+         ORDER BY bucket_ts DESC LIMIT 1`,
+    )
+    .get(monitor.id) as { value: number } | undefined;
+
+  if (certRow) {
+    const cert = evaluateCert(certRow.value, {
+      certWarnDays: monitor.certWarnDays,
+      certCritDays: monitor.certCritDays,
+    });
+    if (cert.severity !== null) {
+      const outcome = await engine.raiseAlert({
+        fingerprint: certFp,
+        monitor: monitor.id,
+        type: "cert",
+        severity: cert.severity,
+        title: `${monitor.id} TLS ${cert.daysLeft < 0 ? "certificate expired" : "certificate expiring"}`,
+        body: `The TLS ${cert.message}. Renew it before browsers start refusing the connection.`,
+        meta: { daysLeft: cert.daysLeft },
+      });
+      report.actions.push({ fingerprint: certFp, action: outcome.action });
+    } else {
+      // No clean-streak hysteresis here on purpose: unlike traffic or DDoS,
+      // the renewal is a step change, not a noisy signal that can flap.
+      const outcome = await engine.resolveAlert({
+        fingerprint: certFp,
+        title: `${monitor.id} TLS certificate renewed`,
+        body: `The ${cert.message}.`,
+      });
+      if (outcome.action !== "not-found") {
+        report.actions.push({ fingerprint: certFp, action: outcome.action });
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Content integrity — probe-driven, so like the cert check it must run
+  // before the Cloudflare early-return. This is the one detector that can
+  // catch a site which is up, fast, and busy, and has still been defaced.
+  // ---------------------------------------------------------------
+  const forbiddenFp = `${monitor.id}:content:forbidden`;
+  const sizeFp = `${monitor.id}:content:size`;
+
+  if (probeState?.last_body_bytes != null) {
+    const sizeHistory = sqlite
+      .prepare(
+        `SELECT value FROM metrics
+           WHERE monitor = ? AND metric = 'body_bytes' AND bucket_ts < ?
+           ORDER BY bucket_ts DESC LIMIT 60`,
+      )
+      .all(monitor.id, evalTs) as Array<{ value: number }>;
+
+    const content = evaluateContent(
+      {
+        forbidHits: parseForbidHits(probeState.last_forbid_hits),
+        bodyBytes: probeState.last_body_bytes,
+        bodyBytesBaseline: sizeHistory.map((r) => r.value),
+      },
+      {
+        spikeZ: monitor.spikeZ,
+        minRelativeChange: monitor.minRelativeChange,
+        minSamples: monitor.minSamples,
+      },
+    );
+
+    for (const [kind, fp] of [
+      ["forbidden", forbiddenFp],
+      ["size", sizeFp],
+    ] as const) {
+      const finding = content.findings.find((f) => f.kind === kind);
+      if (finding) {
+        const outcome = await engine.raiseAlert({
+          fingerprint: fp,
+          monitor: monitor.id,
+          type: "content",
+          severity: finding.severity,
+          title:
+            kind === "forbidden"
+              ? `${monitor.id} content injection`
+              : `${monitor.id} unexpected page size`,
+          body: `The ${finding.message}.`,
+          meta: finding.meta,
+        });
+        report.actions.push({ fingerprint: fp, action: outcome.action });
+      } else {
+        const outcome = await engine.resolveAlert({
+          fingerprint: fp,
+          title:
+            kind === "forbidden"
+              ? `${monitor.id} content clean again`
+              : `${monitor.id} page size back to normal`,
+          body:
+            kind === "forbidden"
+              ? "No blocked terms found in the page body."
+              : "Response body size is back within its usual range.",
+        });
+        if (outcome.action !== "not-found") {
+          report.actions.push({ fingerprint: fp, action: outcome.action });
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Extra baselined metrics (GA4 users, latency, bytes).
+  //
+  // Reuses gatherBaseline + evaluateTraffic + confirmConsecutive unchanged —
+  // those were always pure and metric-agnostic; only a caller was missing.
+  //
+  // `ga_active_users` dropping is the sharpest gap this closes: when the CDN
+  // is healthy but the page is broken in the browser, Cloudflare still sees
+  // normal request volume while GA4 watches the humans disappear. No other
+  // detector here can see that.
+  //
+  // Runs before the Cloudflare early-return so a monitor with GA4 but no CF
+  // zone is still covered.
+  // ---------------------------------------------------------------
+  const recentByMetric = state.recentByMetric ?? {};
+  for (const [metricName, override] of Object.entries(monitor.baselines)) {
+    if (!override.enabled) continue;
+    const metric = metricName as MetricName;
+    const fp = `${monitor.id}:baseline:${metric}`;
+
+    const currentRow = sqlite
+      .prepare(
+        `SELECT value FROM metrics
+           WHERE monitor = ? AND metric = ? AND bucket_ts = ?`,
+      )
+      .get(monitor.id, metric, evalTs) as { value: number } | undefined;
+
+    if (!currentRow) continue;
+
+    const history = loadMetricHistory(sqlite, monitor.id, metric, evalTs);
+    const metricBaseline = gatherBaseline(evalTs, history, {
+      bucketSeconds: monitor.bucketSeconds,
+      baselineWeeks: monitor.baselineWeeks,
+      minSamples: monitor.minSamples,
+    });
+
+    const result = evaluateTraffic(currentRow.value, metricBaseline.samples, {
+      spikeZ: override.spikeZ ?? monitor.spikeZ,
+      // Defaults to 0, not to the monitor's minBaseline: that floor is
+      // expressed in requests-per-bucket and means nothing applied to
+      // milliseconds or active users.
+      minBaseline: override.minBaseline ?? 0,
+      minRelativeChange:
+        override.minRelativeChange ?? monitor.minRelativeChange,
+    });
+
+    const recent = [...(recentByMetric[metric] ?? []), result].slice(-10);
+    recentByMetric[metric] = recent;
+
+    const confirmed = confirmConsecutive(
+      recent,
+      override.consecutiveBuckets ?? monitor.consecutiveBuckets,
+    );
+    // Direction filtering happens here rather than inside the detector: only
+    // the caller knows that a GA4 rise is good news and a latency fall is too.
+    const directionWanted =
+      override.direction === "both" || result.direction === override.direction;
+
+    if (confirmed && result.direction !== null && directionWanted) {
+      const outcome = await engine.raiseAlert({
+        fingerprint: fp,
+        monitor: monitor.id,
+        type: metric === "latency_ms" ? "latency" : "traffic",
+        severity: override.severity,
+        title: `${monitor.id} ${METRIC_LABELS[metric] ?? metric} ${result.direction}`,
+        body: `${METRIC_LABELS[metric] ?? metric}=${round2(currentRow.value)}, baseline median=${round2(result.median)}, z=${result.z.toFixed(2)}, Δrel=${(result.relativeChange * 100).toFixed(1)}%.`,
+        meta: {
+          metric,
+          z: result.z,
+          median: result.median,
+          relativeChange: result.relativeChange,
+        },
+      });
+      report.actions.push({ fingerprint: fp, action: outcome.action });
+    } else {
+      const outcome = await engine.resolveAlert({
+        fingerprint: fp,
+        title: `${monitor.id} ${METRIC_LABELS[metric] ?? metric} back to normal`,
+        body: `${METRIC_LABELS[metric] ?? metric}=${round2(currentRow.value)}, within baseline range.`,
+      });
+      if (outcome.action !== "not-found") {
+        report.actions.push({ fingerprint: fp, action: outcome.action });
+      }
+    }
+  }
+  state.recentByMetric = recentByMetric;
 
   // ---------------------------------------------------------------
   // Cloudflare-driven: traffic + DDoS

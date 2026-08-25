@@ -11,6 +11,11 @@
       "label": "Example site",
       "expectStatusBelow": 400,
       "expectText": "Example Domain",
+      "forbidText": ["slot gacor", "judi online"],
+      "baselines": {
+        "ga_active_users": { "direction": "drop", "severity": "critical" },
+        "latency_ms": { "direction": "spike" }
+      },
       "cloudflareZoneId": "REPLACE_WITH_ZONE_ID",
       "ga4PropertyId": "REPLACE_WITH_PROPERTY_ID"
     }

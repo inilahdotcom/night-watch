@@ -1,7 +1,4 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { beforeEach, describe, expect, it } from "bun:test";
 import * as schema from "../../db/schema.ts";
@@ -14,23 +11,17 @@ import type {
 import type { Monitor } from "../../config/monitors.ts";
 import type { MetricRow } from "../../seed/generate.ts";
 import { runAnalysisCycle } from "../cycle.ts";
-
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 
 function newDb() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8"));
+  applyAllMigrations(sqlite);
   return { sqlite, db: drizzle(sqlite, { schema }) };
 }
 
 class Capture implements NotificationChannel {
   readonly name = "push" as const;
+  readonly mutedByQuietHours = false;
   sends: RenderedAlert[] = [];
   isReady(): boolean {
     return true;
@@ -58,6 +49,10 @@ function baseMonitor(overrides: Partial<Monitor> = {}): Monitor {
     minBaseline: 50,
     minRelativeChange: 0.4,
     consecutiveBuckets: 2,
+    forbidText: [],
+    baselines: {},
+    certWarnDays: 14,
+    certCritDays: 3,
     minRequests: 300,
     ingestLagSeconds: 240,
     threatRatioCrit: 0.35,
@@ -284,5 +279,419 @@ describe("runAnalysisCycle — uptime", () => {
     const slow = r.actions.find((a) => a.fingerprint === `${monitor.id}:slow`);
     expect(slow?.action).toBe("created");
     expect(push.sends.some((s) => s.type === "latency")).toBe(true);
+  });
+});
+
+describe("runAnalysisCycle — TLS certificate", () => {
+  function seedCert(sqlite: Database, monitorId: string, daysLeft: number, bucketTs: number): void {
+    sqlite
+      .prepare(
+        "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT(monitor, source, metric, bucket_ts) DO UPDATE SET value = excluded.value",
+      )
+      .run(monitorId, "probe", "tls_days_left", bucketTs, daysLeft);
+  }
+
+  it("stays silent on a healthy certificate", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor();
+    seedCert(sqlite, monitor.id, 60, NOW - 600);
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toEqual([]);
+    expect(push.sends).toEqual([]);
+  });
+
+  it("warns inside certWarnDays and escalates to critical inside certCritDays", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor();
+
+    seedCert(sqlite, monitor.id, 10, NOW - 600);
+    let report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:cert`,
+      action: "created",
+    });
+    expect(push.sends[0]!.severity).toBe("warning");
+
+    // Same fingerprint, now urgent — the engine must escalate rather than
+    // open a second row.
+    seedCert(sqlite, monitor.id, 2, NOW - 300);
+    report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:cert`,
+      action: "escalated",
+    });
+    expect(push.sends[1]!.severity).toBe("critical");
+
+    const firing = sqlite
+      .prepare("SELECT count(*) AS n FROM alerts WHERE fingerprint = ? AND status = 'firing'")
+      .get(`${monitor.id}:cert`) as { n: number };
+    expect(firing.n).toBe(1);
+  });
+
+  it("treats an already-expired certificate as critical", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor();
+    seedCert(sqlite, monitor.id, -3, NOW - 600);
+
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(push.sends[0]!.severity).toBe("critical");
+    expect(push.sends[0]!.textBody).toContain("expired 3 days ago");
+  });
+
+  it("resolves once the certificate is renewed", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor();
+
+    seedCert(sqlite, monitor.id, 1, NOW - 600);
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+
+    seedCert(sqlite, monitor.id, 89, NOW - 300);
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:cert`,
+      action: "resolved",
+    });
+    expect(push.sends.at(-1)!.status).toBe("resolved");
+  });
+
+  it("still evaluates the certificate for a monitor with no Cloudflare data", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({ cloudflareZoneId: undefined });
+    seedCert(sqlite, monitor.id, 1, NOW - 600);
+
+    // No CF metrics at all: the cycle short-circuits after this point, so the
+    // cert alert only fires if it is evaluated *before* that early return.
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.skipReason).toContain("no cloudflare metrics");
+    expect(push.sends).toHaveLength(1);
+    expect(push.sends[0]!.severity).toBe("critical");
+  });
+});
+
+describe("runAnalysisCycle — content integrity", () => {
+  function seedProbeContent(
+    sqlite: Database,
+    monitorId: string,
+    args: { bodyBytes: number; forbidHits?: string[] },
+  ): void {
+    sqlite
+      .prepare(
+        `INSERT INTO probe_state
+           (monitor, consecutive_fail, consecutive_ok, is_down, last_check_at, last_status, last_latency_ms, last_error, last_body_bytes, last_forbid_hits)
+         VALUES (?, 0, 1, 0, ?, 200, 120, NULL, ?, ?)
+         ON CONFLICT(monitor) DO UPDATE SET
+           last_body_bytes = excluded.last_body_bytes,
+           last_forbid_hits = excluded.last_forbid_hits`,
+      )
+      .run(
+        monitorId,
+        NOW,
+        args.bodyBytes,
+        JSON.stringify(args.forbidHits ?? []),
+      );
+  }
+
+  function seedSizeHistory(
+    sqlite: Database,
+    monitorId: string,
+    endTs: number,
+    bucketSeconds: number,
+    count: number,
+    bytes: number,
+  ): void {
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+    );
+    for (let i = 1; i <= count; i += 1) {
+      // Small jitter so MAD is non-zero, as it would be in reality.
+      stmt.run(monitorId, "probe", "body_bytes", endTs - i * bucketSeconds, bytes + (i % 3) * 200);
+    }
+  }
+
+  it("raises critical the moment a blocked term appears, even on a healthy page", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({ forbidText: ["slot gacor"] });
+    const evalTs = Math.floor((NOW - monitor.ingestLagSeconds - monitor.bucketSeconds) / monitor.bucketSeconds) * monitor.bucketSeconds;
+    seedSizeHistory(sqlite, monitor.id, evalTs, monitor.bucketSeconds, 20, 100_000);
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 100_100, forbidHits: ["slot gacor"] });
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:content:forbidden`,
+      action: "created",
+    });
+    const sent = push.sends.find((a) => a.type === "content")!;
+    expect(sent.severity).toBe("critical");
+    expect(sent.textBody).toContain("slot gacor");
+  });
+
+  it("resolves once the injected term is gone", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({ forbidText: ["slot gacor"] });
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 100_100, forbidHits: ["slot gacor"] });
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 100_100, forbidHits: [] });
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:content:forbidden`,
+      action: "resolved",
+    });
+    expect(push.sends.at(-1)!.status).toBe("resolved");
+  });
+
+  it("warns when the page collapses, and does not fire on ordinary variation", async () => {
+    const { sqlite, engine } = newEngineHarness();
+    const monitor = baseMonitor();
+    const evalTs = Math.floor((NOW - monitor.ingestLagSeconds - monitor.bucketSeconds) / monitor.bucketSeconds) * monitor.bucketSeconds;
+    seedSizeHistory(sqlite, monitor.id, evalTs, monitor.bucketSeconds, 20, 100_000);
+
+    // 3% off: statistically extreme against this baseline, operationally fine.
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 103_000 });
+    let report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions.map((a) => a.fingerprint)).not.toContain(`${monitor.id}:content:size`);
+
+    // Blank page that still answers 200.
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 300 });
+    report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:content:size`,
+      action: "created",
+    });
+  });
+
+  it("stays silent for a monitor with no body reading at all", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor();
+    seedProbeState(sqlite, monitor.id, false);
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions.map((a) => a.fingerprint)).not.toContain(`${monitor.id}:content:size`);
+    expect(push.sends).toEqual([]);
+  });
+
+  it("survives a corrupt forbid-hits value instead of taking the cycle down", async () => {
+    const { sqlite, engine } = newEngineHarness();
+    const monitor = baseMonitor({ forbidText: ["slot"] });
+    seedProbeContent(sqlite, monitor.id, { bodyBytes: 100_000 });
+    sqlite
+      .prepare("UPDATE probe_state SET last_forbid_hits = ? WHERE monitor = ?")
+      .run("{not json", monitor.id);
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions.map((a) => a.fingerprint)).not.toContain(`${monitor.id}:content:forbidden`);
+  });
+});
+
+describe("runAnalysisCycle — extra baselined metrics", () => {
+  function seedMetric(
+    sqlite: Database,
+    monitorId: string,
+    metric: string,
+    endTs: number,
+    bucketSeconds: number,
+    count: number,
+    value: number,
+  ): void {
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?) " +
+        "ON CONFLICT(monitor, source, metric, bucket_ts) DO UPDATE SET value = excluded.value",
+    );
+    for (let i = 1; i <= count; i += 1) {
+      // Weekly anchors so the seasonal path has something to find, plus
+      // jitter so MAD is non-zero.
+      stmt.run(monitorId, "probe", metric, endTs - i * bucketSeconds, value + (i % 3));
+    }
+  }
+
+  function evalTsFor(monitor: Monitor): number {
+    return (
+      Math.floor(
+        (NOW - monitor.ingestLagSeconds - monitor.bucketSeconds) /
+          monitor.bucketSeconds,
+      ) * monitor.bucketSeconds
+    );
+  }
+
+  function setCurrent(
+    sqlite: Database,
+    monitorId: string,
+    metric: string,
+    ts: number,
+    value: number,
+  ): void {
+    sqlite
+      .prepare(
+        "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT(monitor, source, metric, bucket_ts) DO UPDATE SET value = excluded.value",
+      )
+      .run(monitorId, "probe", metric, ts, value);
+  }
+
+  it("stays completely silent when no baselines are configured", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor(); // baselines: {}
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5); // catastrophic drop
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toEqual([]);
+    expect(push.sends).toEqual([]);
+  });
+
+  it("alerts on a GA4 active-users collapse once configured", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        ga_active_users: {
+          enabled: true,
+          direction: "drop",
+          severity: "critical",
+          consecutiveBuckets: 1,
+        },
+      },
+    });
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5);
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:baseline:ga_active_users`,
+      action: "created",
+    });
+    const sent = push.sends.at(-1)!;
+    expect(sent.severity).toBe("critical");
+    // Reads as English, not as a column name.
+    expect(sent.textBody).toContain("active users drop");
+  });
+
+  it("ignores a GA4 spike when only drops are wanted", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        ga_active_users: {
+          enabled: true,
+          direction: "drop",
+          severity: "warning",
+          consecutiveBuckets: 1,
+        },
+      },
+    });
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5000); // going viral
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions.map((a) => a.fingerprint)).not.toContain(
+      `${monitor.id}:baseline:ga_active_users`,
+    );
+    expect(push.sends).toEqual([]);
+  });
+
+  it("alerts on a latency rise and files it as a latency alert", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        latency_ms: {
+          enabled: true,
+          direction: "spike",
+          severity: "warning",
+          consecutiveBuckets: 1,
+        },
+      },
+    });
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "latency_ms", evalTs, monitor.bucketSeconds, 30, 200);
+    // 1200ms: far below the flat 3000ms slowResponseMs threshold, so the
+    // existing latency check stays silent — this is the gap being closed.
+    setCurrent(sqlite, monitor.id, "latency_ms", evalTs, 1200);
+
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    const sent = push.sends.at(-1)!;
+    expect(sent.type).toBe("latency");
+    expect(sent.textBody).toContain("latency spike");
+  });
+
+  it("respects `enabled: false`", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        ga_active_users: {
+          enabled: false,
+          direction: "both",
+          severity: "warning",
+        },
+      },
+    });
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5);
+
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(push.sends).toEqual([]);
+  });
+
+  it("survives state written before recentByMetric existed", async () => {
+    const { sqlite, engine } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        ga_active_users: {
+          enabled: true,
+          direction: "drop",
+          severity: "warning",
+          consecutiveBuckets: 1,
+        },
+      },
+    });
+    // Exactly the shape a worker running the previous version left behind.
+    sqlite
+      .prepare(
+        "INSERT INTO system_state (key, value, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(
+        `analysis:${monitor.id}`,
+        JSON.stringify({ recentTraffic: [], cleanDDoSStreak: 0, cleanSlowStreak: 0 }),
+        NOW,
+      );
+
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5);
+
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:baseline:ga_active_users`,
+      action: "created",
+    });
+  });
+
+  it("resolves once the metric returns to normal", async () => {
+    const { sqlite, engine, push } = newEngineHarness();
+    const monitor = baseMonitor({
+      baselines: {
+        ga_active_users: {
+          enabled: true,
+          direction: "drop",
+          severity: "warning",
+          consecutiveBuckets: 1,
+        },
+      },
+    });
+    const evalTs = evalTsFor(monitor);
+    seedMetric(sqlite, monitor.id, "ga_active_users", evalTs, monitor.bucketSeconds, 30, 500);
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 5);
+    await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+
+    setCurrent(sqlite, monitor.id, "ga_active_users", evalTs, 500);
+    const report = await runAnalysisCycle({ monitor, engine, sqlite, now: () => NOW });
+    expect(report.actions).toContainEqual({
+      fingerprint: `${monitor.id}:baseline:ga_active_users`,
+      action: "resolved",
+    });
+    expect(push.sends.at(-1)!.status).toBe("resolved");
   });
 });

@@ -1,4 +1,7 @@
 import type { ActiveAlertView } from "@night-watch/core/web";
+import { DeliveryChips } from "./delivery-chips";
+import { AckButton } from "./ack-button";
+import { AlertMeta } from "./alert-meta";
 
 interface Props {
   alerts: ActiveAlertView[] | undefined;
@@ -42,6 +45,9 @@ export function ActiveAlerts({ alerts }: Props) {
                     </div>
                     <h3 className="mt-2 text-lg leading-tight">{a.title}</h3>
                     <p className="mt-1 text-sm text-muted-foreground">{a.body}</p>
+                    <AlertMeta meta={a.meta} />
+                    <DeliveryChips deliveries={a.deliveries} />
+                    <AckButton alert={a} />
                   </div>
                   <div className="mono text-right text-xs text-muted-foreground">
                     <div>started</div>

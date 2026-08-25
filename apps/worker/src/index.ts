@@ -3,6 +3,7 @@ import {
   buildDefaultHandlers,
   createAlertEngine,
   createPushChannel,
+  createTelegramChannel,
   createWhatsAppChannel,
   isSnoozedNow,
   parseQuietHours,
@@ -70,6 +71,20 @@ async function main(): Promise<void> {
     log.info("push channel enabled");
   } else {
     log.warn("push channel disabled — set VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY");
+  }
+
+  if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
+    channels.push(
+      createTelegramChannel({
+        botToken: env.TELEGRAM_BOT_TOKEN,
+        chatId: env.TELEGRAM_CHAT_ID,
+      }),
+    );
+    log.info({ chatId: env.TELEGRAM_CHAT_ID }, "telegram channel enabled");
+  } else {
+    log.warn(
+      "telegram channel disabled — set TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID",
+    );
   }
 
   if (env.WA_GROUP_JID) {

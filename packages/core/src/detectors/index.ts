@@ -39,3 +39,20 @@ export {
   type DDoSSeverity,
   type DDoSSignal,
 } from "./ddos.ts";
+
+export {
+  evaluateCert,
+  type CertDetectorOptions,
+  type CertResult,
+  type CertSeverity,
+} from "./cert.ts";
+
+export {
+  evaluateContent,
+  findForbidden,
+  type ContentDetectorOptions,
+  type ContentFinding,
+  type ContentInput,
+  type ContentResult,
+  type ContentSeverity,
+} from "./content.ts";

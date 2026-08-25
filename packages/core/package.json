@@ -23,7 +23,8 @@
     "db:demo": "bun run src/seed/demo.ts",
     "db:collect": "bun run src/collectors/collect.ts",
     "alert:test": "bun run src/alerts/test-alert.ts",
-    "wa:groups": "bun run src/alerts/wa-groups.ts"
+    "wa:groups": "bun run src/alerts/wa-groups.ts",
+    "detect:backtest": "bun run src/analysis/backtest.ts"
   },
   "dependencies": {
     "@google-analytics/data": "latest",

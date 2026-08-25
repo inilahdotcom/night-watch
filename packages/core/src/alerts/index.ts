@@ -39,6 +39,10 @@ export {
 } from "./commands.ts";
 export { createPushChannel, type PushChannelOptions } from "./channels/push.ts";
 export {
+  createTelegramChannel,
+  type TelegramChannelOptions,
+} from "./channels/telegram.ts";
+export {
   createWhatsAppChannel,
   type WhatsAppAdapter,
   type WhatsAppChannelOptions,

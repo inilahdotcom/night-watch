@@ -1,27 +1,17 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { describe, expect, it } from "bun:test";
 import * as schema from "../../db/schema.ts";
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 import {
   enqueueCommand,
   subscribePush,
   unsubscribePush,
 } from "../mutations.ts";
 
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
-
 function newDb() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8"));
+  applyAllMigrations(sqlite);
   return { sqlite, db: drizzle(sqlite, { schema }) };
 }
 

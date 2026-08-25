@@ -1,7 +1,14 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { Database } from "bun:sqlite";
 import type { DB } from "../db/client.ts";
-import { alerts, metrics, probeState, systemState } from "../db/schema.ts";
+import {
+  alerts,
+  deliveries,
+  metrics,
+  probeState,
+  pushSubscriptions,
+  systemState,
+} from "../db/schema.ts";
 import type { MetricName, MetricSource } from "../db/schema.ts";
 import {
   readActiveSnoozes,
@@ -10,6 +17,7 @@ import {
 } from "../alerts/maintenance.ts";
 import {
   confirmConsecutive,
+  evaluateCert,
   evaluateTraffic,
   gatherBaseline,
   robustZScore,
@@ -53,6 +61,23 @@ export interface ActiveAlertView {
   body: string;
   startedAt: number;
   meta: Record<string, unknown>;
+  ackedAt: number | null;
+  ackedBy: string | null;
+  /** Per-channel delivery outcomes for this alert, newest attempt per channel. */
+  deliveries: DeliveryView[];
+}
+
+export interface DeliveryView {
+  channel: string;
+  status: "sent" | "failed" | "skipped";
+  detail: string | null;
+  createdAt: number;
+}
+
+export interface PushHealthView {
+  total: number;
+  /** Subscriptions that have failed at least once since their last success. */
+  failing: number;
 }
 
 export interface HistoryEntryView extends ActiveAlertView {
@@ -92,6 +117,14 @@ export interface MonitorSummaryView {
   lastError: string | null;
   thresholds: MonitorThresholds | null;
   currentAlerts: Array<{ type: string; severity: string }>;
+  /** Days until the TLS cert expires. Null for plain-HTTP or unchecked monitors. */
+  certDaysLeft: number | null;
+  /**
+   * Verdict from the same `evaluateCert` the alert engine runs. Kept here
+   * rather than shipping thresholds to the browser so a coloured tile means
+   * exactly what a cert alert means.
+   */
+  certSeverity: "warning" | "critical" | null;
 }
 
 /** The config fields `getMonitors` needs. Structural, like `getActiveSnoozes`. */
@@ -99,6 +132,8 @@ export interface MonitorIdentityInput extends MonitorThresholds {
   id: string;
   url: string;
   label?: string;
+  certWarnDays: number;
+  certCritDays: number;
 }
 
 export interface SystemHealthView {
@@ -119,6 +154,21 @@ export interface SnoozesView {
 // --------------------------------------------------------------------------
 // Query implementations
 // --------------------------------------------------------------------------
+
+export interface UptimeWindowView {
+  /** Window length in hours (24, 168, 720). */
+  hours: number;
+  /** Fraction of sampled buckets that were up, 0..1. Null when no samples. */
+  ratio: number | null;
+  /** How many buckets contributed — the honest denominator. */
+  samples: number;
+}
+
+export interface UptimeView {
+  monitor: string;
+  windows: UptimeWindowView[];
+  updatedAt: number;
+}
 
 export function getStatus(db: DB): StatusView {
   const firing = db
@@ -170,6 +220,7 @@ export function getActiveAlerts(db: DB): ActiveAlertView[] {
     .where(eq(alerts.status, "firing"))
     .orderBy(desc(alerts.startedAt))
     .all();
+  const deliveriesByAlert = loadDeliveries(db, rows.map((r) => r.id));
   return rows.map((r) => ({
     id: r.id,
     fingerprint: r.fingerprint,
@@ -180,7 +231,63 @@ export function getActiveAlerts(db: DB): ActiveAlertView[] {
     body: r.body,
     startedAt: r.startedAt,
     meta: (r.meta as Record<string, unknown>) ?? {},
+    ackedAt: r.ackedAt,
+    ackedBy: r.ackedBy,
+    deliveries: deliveriesByAlert.get(r.id) ?? [],
   }));
+}
+
+/**
+ * Latest delivery attempt per (alert, channel) for the given alerts.
+ *
+ * One query for the whole list rather than one per alert: the alert list is
+ * refetched every 20 seconds, and `deliveries` accumulates a row per channel
+ * per notification, so the per-alert version would grow into N queries over a
+ * table that only ever gets longer.
+ */
+function loadDeliveries(
+  db: DB,
+  alertIds: readonly number[],
+): Map<number, DeliveryView[]> {
+  const out = new Map<number, DeliveryView[]>();
+  if (alertIds.length === 0) return out;
+
+  const rows = db
+    .select()
+    .from(deliveries)
+    .where(inArray(deliveries.alertId, [...alertIds]))
+    .orderBy(desc(deliveries.createdAt))
+    .all();
+
+  for (const row of rows) {
+    const list = out.get(row.alertId) ?? [];
+    // Rows arrive newest-first, so the first sighting of a channel is the
+    // most recent attempt — anything older for that channel is history.
+    if (list.some((d) => d.channel === row.channel)) continue;
+    list.push({
+      channel: row.channel,
+      status: row.status,
+      detail: row.detail,
+      createdAt: row.createdAt,
+    });
+    out.set(row.alertId, list);
+  }
+  return out;
+}
+
+/** Push subscription health — surfaces devices that quietly stopped receiving. */
+export function getPushHealth(db: DB): PushHealthView {
+  const row = db
+    .select({
+      total: sql<number>`count(*)`,
+      failing: sql<number>`sum(case when ${pushSubscriptions.failCount} > 0 then 1 else 0 end)`,
+    })
+    .from(pushSubscriptions)
+    .get();
+  return {
+    total: Number(row?.total ?? 0),
+    failing: Number(row?.failing ?? 0),
+  };
 }
 
 export function getAlertHistory(db: DB, limit = 25): HistoryEntryView[] {
@@ -190,6 +297,7 @@ export function getAlertHistory(db: DB, limit = 25): HistoryEntryView[] {
     .orderBy(desc(alerts.startedAt))
     .limit(limit)
     .all();
+  const deliveriesByAlert = loadDeliveries(db, rows.map((r) => r.id));
   return rows.map((r) => ({
     id: r.id,
     fingerprint: r.fingerprint,
@@ -203,6 +311,9 @@ export function getAlertHistory(db: DB, limit = 25): HistoryEntryView[] {
     resolvedAt: r.resolvedAt,
     notifyCount: r.notifyCount,
     meta: (r.meta as Record<string, unknown>) ?? {},
+    ackedAt: r.ackedAt,
+    ackedBy: r.ackedBy,
+    deliveries: deliveriesByAlert.get(r.id) ?? [],
   }));
 }
 
@@ -576,8 +687,23 @@ export function getMonitors(
     if (!byMonitor.has(a.monitor)) byMonitor.set(a.monitor, []);
     byMonitor.get(a.monitor)!.push({ type: a.type, severity: a.severity });
   }
+
+  // Latest cert reading per monitor. One grouped scan beats one query per
+  // card, and the metrics index is on (monitor, metric, bucket_ts DESC).
+  const certRows = db
+    .select({
+      monitor: metrics.monitor,
+      value: metrics.value,
+      bucketTs: sql<number>`max(${metrics.bucketTs})`,
+    })
+    .from(metrics)
+    .where(eq(metrics.metric, "tls_days_left"))
+    .groupBy(metrics.monitor)
+    .all();
+  const certByMonitor = new Map(certRows.map((r) => [r.monitor, r.value]));
   return probeRows.map((r) => {
     const cfg = byId.get(r.monitor);
+    const certDays = certByMonitor.get(r.monitor);
     return {
       id: r.monitor,
       label: cfg?.label ?? null,
@@ -598,6 +724,14 @@ export function getMonitors(
           }
         : null,
       currentAlerts: byMonitor.get(r.monitor) ?? [],
+      certDaysLeft: certDays ?? null,
+      certSeverity:
+        certDays !== undefined && cfg
+          ? evaluateCert(certDays, {
+              certWarnDays: cfg.certWarnDays,
+              certCritDays: cfg.certCritDays,
+            }).severity
+          : null,
     };
   });
 }
@@ -651,6 +785,51 @@ export function getActiveSnoozes(
     .filter((m) => m.maintenanceWindows.length > 0)
     .map((m) => ({ monitor: m.id, windows: m.maintenanceWindows }));
   return { adhoc, recurring, updatedAt: now };
+}
+
+const DEFAULT_UPTIME_WINDOWS = [24, 24 * 7, 24 * 30] as const;
+
+/**
+ * Uptime ratio per window, from the stored `up` metric.
+ *
+ * Accuracy caveat worth stating plainly: the probe runs every minute but `up`
+ * is upserted into a `bucketSeconds` bucket (300s by default), so the last
+ * write in a bucket wins. Each sample therefore represents the *final minute*
+ * of its bucket, not an average of the five. The resulting percentage is
+ * accurate to one bucket, which is why the view also returns `samples` — a
+ * ratio over 12 buckets deserves less confidence than one over 8640, and the
+ * caller should be able to tell the difference.
+ */
+export function getUptime(
+  db: DB,
+  monitor: string,
+  hoursWindows: readonly number[] = DEFAULT_UPTIME_WINDOWS,
+): UptimeView {
+  const now = Math.floor(Date.now() / 1000);
+  const windows = hoursWindows.map((hours) => {
+    const row = db
+      .select({
+        up: sql<number>`sum(${metrics.value})`,
+        n: sql<number>`count(*)`,
+      })
+      .from(metrics)
+      .where(
+        and(
+          eq(metrics.monitor, monitor),
+          eq(metrics.metric, "up"),
+          gte(metrics.bucketTs, now - hours * 3600),
+        ),
+      )
+      .get();
+    const samples = Number(row?.n ?? 0);
+    return {
+      hours,
+      samples,
+      ratio: samples > 0 ? Number(row?.up ?? 0) / samples : null,
+    };
+  });
+
+  return { monitor, windows, updatedAt: now };
 }
 
 /** For dashboard "N alerts in last 24h" — cheap count. */

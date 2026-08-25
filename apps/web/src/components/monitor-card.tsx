@@ -6,6 +6,7 @@ import type {
 } from "@night-watch/core/web";
 import { fetchPulse } from "../lib/server-fns";
 import { PulseBand, formatCount } from "./pulse-band";
+import { UptimeStrip } from "./uptime-strip";
 import { cn } from "@/lib/utils";
 
 // One card per monitor. It has to answer three questions at a glance, on a
@@ -121,13 +122,24 @@ export function MonitorCard({ monitor }: Props) {
         </dl>
       )}
 
-      {/* 5 — facts, failure reason, and what is actually firing */}
-      <dl className="mono mt-5 grid grid-cols-3 gap-x-3 gap-y-3 text-xs">
+      {/* 5 — uptime over the long windows the chart cannot show */}
+      {!orphaned && <UptimeStrip monitor={monitor.id} />}
+
+      {/* 6 — facts, failure reason, and what is actually firing */}
+      <dl className="mono mt-5 grid grid-cols-2 gap-x-3 gap-y-3 text-xs sm:grid-cols-4">
         <Fact label="HTTP status" value={monitor.lastStatus?.toString() ?? "—"} />
         <Fact
           label="Last checked"
           value={monitor.lastCheckAt ? formatAgo(monitor.lastCheckAt) : "never"}
           tone={status.kind === "stale" ? "warning" : undefined}
+        />
+        <Fact
+          label="TLS expires"
+          value={formatCertDays(monitor.certDaysLeft)}
+          // The verdict comes from getMonitors, which runs the same
+          // evaluateCert the alert engine runs — the card does not own the
+          // definition of "expiring soon".
+          tone={monitor.certSeverity ?? undefined}
         />
         <Fact
           label="Alerts firing"
@@ -359,7 +371,7 @@ function Fact({
 }: {
   label: string;
   value: string;
-  tone?: "warning";
+  tone?: "warning" | "critical";
 }) {
   return (
     <div>
@@ -369,7 +381,11 @@ function Fact({
       <dd
         className={cn(
           "mt-1 tabular-nums",
-          tone === "warning" ? "text-status-warning" : "text-foreground",
+          tone === "critical"
+            ? "text-status-critical"
+            : tone === "warning"
+              ? "text-status-warning"
+              : "text-foreground",
         )}
       >
         {value}
@@ -410,4 +426,16 @@ function formatAgo(unixSec: number): string {
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86_400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86_400)}d ago`;
+}
+
+/**
+ * Days are the useful unit here — "expires in 3 days" is actionable in a way
+ * that a date string is not at 2am. Past expiry we say so outright rather
+ * than printing a negative number.
+ */
+function formatCertDays(daysLeft: number | null): string {
+  if (daysLeft === null) return "—";
+  if (daysLeft < 0) return "expired";
+  if (daysLeft === 0) return "today";
+  return `${daysLeft}d`;
 }

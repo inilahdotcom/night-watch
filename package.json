@@ -15,6 +15,7 @@
     "db:migrate": "cd packages/core && bun run db:migrate",
     "db:seed": "cd packages/core && bun run db:seed",
     "db:demo": "cd packages/core && bun run db:demo",
+    "detect:backtest": "cd packages/core && bun run detect:backtest",
     "db:collect": "cd packages/core && bun run db:collect",
     "alert:test": "cd packages/core && bun run alert:test",
     "wa:groups": "cd packages/core && bun run wa:groups",

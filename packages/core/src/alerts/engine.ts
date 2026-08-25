@@ -1,6 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import type { DB } from "../db/client.ts";
 import { alerts, deliveries, pushSubscriptions } from "../db/schema.ts";
+import type { Channel } from "../db/schema.ts";
 import { createLogger } from "../logger.ts";
 import { renderAlert } from "./render.ts";
 import { isQuietAt, type QuietWindow } from "./quiet-hours.ts";
@@ -79,6 +80,8 @@ interface StoredAlertRow {
   started_at: number;
   last_notified_at: number | null;
   notify_count: number;
+  acked_at: number | null;
+  acked_by: string | null;
   resolved_at: number | null;
 }
 
@@ -104,6 +107,12 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
   );
   const markNotifiedStmt = config.sqlite.prepare(
     "UPDATE alerts SET last_notified_at = ?, notify_count = notify_count + 1 WHERE id = ?",
+  );
+  // Escalation invalidates a previous acknowledgement: a warning someone
+  // accepted is not the same alert once it becomes critical, so the operator
+  // has to see it again and ack it again.
+  const clearAckStmt = config.sqlite.prepare(
+    "UPDATE alerts SET acked_at = NULL, acked_by = NULL WHERE id = ?",
   );
   const markResolvedStmt = config.sqlite.prepare(
     "UPDATE alerts SET status = 'resolved', resolved_at = ? WHERE id = ?",
@@ -172,16 +181,16 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
       const isRecovery = rendered.status === "resolved";
       const isCritical = rendered.severity === "critical" && !isRecovery;
 
-      // Quiet hours: only mute WhatsApp for non-critical alerts. Critical
-      // always breaks through, per brief §6.
-      if (
-        channel.name === "whatsapp" &&
-        !isCritical &&
-        isQuiet
-      ) {
-        recordDelivery(rendered.id, "whatsapp", "skipped", "quiet hours");
+      // Quiet hours mute the intrusive channels for non-critical alerts.
+      // Critical always breaks through, per brief §6.
+      //
+      // The channel declares whether it is mutable rather than the engine
+      // naming it, so adding Telegram (or anything after it) does not mean
+      // editing this condition.
+      if (channel.mutedByQuietHours && !isCritical && isQuiet) {
+        recordDelivery(rendered.id, channel.name, "skipped", "quiet hours");
         results.push({
-          channel: "whatsapp",
+          channel: channel.name,
           result: { ok: false, detail: "skipped: quiet hours" },
         });
         continue;
@@ -234,7 +243,7 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
 
   function recordDelivery(
     alertId: number,
-    channel: string,
+    channel: Channel,
     status: "sent" | "failed" | "skipped",
     detail: string,
   ): void {
@@ -242,7 +251,7 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
       .insert(deliveries)
       .values({
         alertId,
-        channel: channel as "push" | "whatsapp",
+        channel,
         status,
         detail,
         createdAt: now(),
@@ -269,8 +278,12 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
         const nowTs = now();
         const escalated =
           existing.severity !== "critical" && input.severity === "critical";
+        // An acknowledged alert stops nagging. Only the cooldown path is
+        // gated — escalation below is deliberately not, because acking a
+        // warning must not silence its promotion to critical.
         const cooledDown =
           input.severity === "critical" &&
+          existing.acked_at === null &&
           existing.last_notified_at !== null &&
           nowTs - existing.last_notified_at >= config.cooldownMinutes * 60;
 
@@ -281,6 +294,8 @@ export function createAlertEngine(config: AlertEngineConfig): AlertEngine {
             channelResults: [],
           };
         }
+
+        if (escalated) clearAckStmt.run(existing.id);
 
         const stored = readStored(existing.id);
         const rendered = render(stored);

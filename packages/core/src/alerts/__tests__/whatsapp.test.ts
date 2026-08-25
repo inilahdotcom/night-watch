@@ -64,6 +64,7 @@ function alert(text = "hello"): RenderedAlert {
     meta: {},
     startedAt: 0,
     resolvedAt: null,
+    htmlBody: "<b>rendered</b>",
     textBody: text,
     pushPayload: {},
   };

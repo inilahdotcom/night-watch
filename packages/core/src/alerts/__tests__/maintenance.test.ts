@@ -1,8 +1,6 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "bun:test";
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 import {
   clearSnooze,
   isInMaintenanceAt,
@@ -21,18 +19,9 @@ function wibTime(hh: number, mm: number, day = 13, month = 7): number {
   return Math.floor(utc / 1000) + hh * 3600 + mm * 60;
 }
 
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
-
 function newDb(): Database {
   const sqlite = new Database(":memory:");
-  const sql = readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8");
-  sqlite.exec(sql);
+  applyAllMigrations(sqlite);
   return sqlite;
 }
 

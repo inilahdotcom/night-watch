@@ -26,3 +26,5 @@ export {
   collectOne,
   type MonitorReport,
 } from "./collect.ts";
+
+export { checkTls, tlsTargetFor, type TlsResult, type TlsOptions } from "./tls.ts";

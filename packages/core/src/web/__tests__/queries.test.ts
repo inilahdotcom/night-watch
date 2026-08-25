@@ -1,10 +1,8 @@
 import { Database } from "bun:sqlite";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { describe, expect, it } from "bun:test";
 import * as schema from "../../db/schema.ts";
+import { applyAllMigrations } from "../../db/schema-sql.ts";
 import {
   getActiveAlerts,
   getAlertHistory,
@@ -13,19 +11,12 @@ import {
   getSeries,
   getStatus,
   getSystemHealth,
+  getUptime,
 } from "../queries.ts";
-
-const MIGRATIONS_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-  "migrations",
-);
 
 function newDb() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(readFileSync(join(MIGRATIONS_DIR, "0000_init.sql"), "utf8"));
+  applyAllMigrations(sqlite);
   return { sqlite, db: drizzle(sqlite, { schema }) };
 }
 
@@ -467,6 +458,8 @@ describe("getMonitors with config", () => {
         threatRatioWarn: 0.15,
         threatRatioCrit: 0.35,
         minRequests: 300,
+        certWarnDays: 14,
+        certCritDays: 3,
       },
     ]);
 
@@ -481,5 +474,74 @@ describe("getMonitors with config", () => {
     expect(gone.label).toBeNull();
     expect(gone.url).toBeNull();
     expect(gone.thresholds).toBeNull();
+  });
+});
+
+describe("getUptime", () => {
+  function seedUp(
+    sqlite: Database,
+    monitor: string,
+    values: readonly number[],
+    startAgoSeconds: number,
+  ): void {
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+    );
+    values.forEach((v, i) => {
+      stmt.run(monitor, "probe", "up", NOW - startAgoSeconds + i * 300, v);
+    });
+  }
+
+  it("returns null ratio and zero samples when nothing was recorded", () => {
+    const { db } = newDb();
+    const view = getUptime(db, "m1");
+    expect(view.windows).toHaveLength(3);
+    for (const w of view.windows) {
+      expect(w.ratio).toBeNull();
+      expect(w.samples).toBe(0);
+    }
+  });
+
+  it("computes the ratio of up buckets", () => {
+    const { sqlite, db } = newDb();
+    // 8 up, 2 down, all within the last hour.
+    seedUp(sqlite, "m1", [1, 1, 1, 1, 0, 1, 1, 0, 1, 1], 3000);
+
+    const view = getUptime(db, "m1", [24]);
+    expect(view.windows[0]!.samples).toBe(10);
+    expect(view.windows[0]!.ratio).toBeCloseTo(0.8, 6);
+  });
+
+  it("scopes each window to its own cutoff", () => {
+    const { sqlite, db } = newDb();
+    // One down bucket 10 days back, one up bucket just now.
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+    );
+    stmt.run("m1", "probe", "up", NOW - 10 * 24 * 3600, 0);
+    stmt.run("m1", "probe", "up", NOW - 300, 1);
+
+    const [day, week, month] = getUptime(db, "m1", [24, 24 * 7, 24 * 30]).windows;
+    // The 10-day-old outage is outside 24h and 7d, inside 30d.
+    expect(day!.samples).toBe(1);
+    expect(day!.ratio).toBe(1);
+    expect(week!.samples).toBe(1);
+    expect(week!.ratio).toBe(1);
+    expect(month!.samples).toBe(2);
+    expect(month!.ratio).toBeCloseTo(0.5, 6);
+  });
+
+  it("does not count other monitors or other metrics", () => {
+    const { sqlite, db } = newDb();
+    const stmt = sqlite.prepare(
+      "INSERT INTO metrics (monitor, source, metric, bucket_ts, value) VALUES (?, ?, ?, ?, ?)",
+    );
+    stmt.run("m1", "probe", "up", NOW - 300, 1);
+    stmt.run("m2", "probe", "up", NOW - 300, 0); // other monitor
+    stmt.run("m1", "probe", "latency_ms", NOW - 300, 0); // other metric
+
+    const view = getUptime(db, "m1", [24]);
+    expect(view.windows[0]!.samples).toBe(1);
+    expect(view.windows[0]!.ratio).toBe(1);
   });
 });

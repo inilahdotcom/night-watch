@@ -31,6 +31,15 @@ export function History({ entries }: Props) {
                   {entry.status === "resolved" && entry.resolvedAt !== null && (
                     <> · lasted {formatDuration(entry.resolvedAt - entry.startedAt)}</>
                   )}
+                  {/* Only failures. This list is meant to stay scannable at 25
+                      rows, so a successful delivery — the normal case — earns
+                      no ink; a notification that never arrived does. */}
+                  {failedChannels(entry).length > 0 && (
+                    <span className="text-status-critical">
+                      {" "}
+                      · delivery failed: {failedChannels(entry).join(", ")}
+                    </span>
+                  )}
                 </div>
               </div>
               <span className="mono text-xs text-muted-foreground">
@@ -42,6 +51,10 @@ export function History({ entries }: Props) {
       )}
     </section>
   );
+}
+
+function failedChannels(e: HistoryEntryView): string[] {
+  return e.deliveries.filter((d) => d.status === "failed").map((d) => d.channel);
 }
 
 function dotColor(e: HistoryEntryView): string {

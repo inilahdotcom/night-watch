@@ -3,13 +3,32 @@
 // and the control-URL sanity check happen in the collector — this file only
 // interprets results.
 
+/**
+ * Content readings the probe collects for free. Optional so every existing
+ * caller and test keeps compiling — the uptime state machine ignores them
+ * entirely; they exist for the content detector downstream.
+ */
+export interface ProbeContent {
+  /** SHA-256 of the response body. Forensics only — never an alert trigger. */
+  bodyHash: string;
+  bodyBytes: number;
+  /** Blocklist terms found in the body, in config order. */
+  forbidHits: string[];
+}
+
 export type ProbeResult =
-  | { kind: "ok"; latencyMs: number; status: number }
+  | {
+      kind: "ok";
+      latencyMs: number;
+      status: number;
+      content?: ProbeContent;
+    }
   | {
       kind: "fail";
       reason: string;
       latencyMs?: number;
       status?: number;
+      content?: ProbeContent;
     };
 
 export interface ProbeState {
