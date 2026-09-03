@@ -64,6 +64,7 @@ const MonitorSchema = z.object({
       ga_active_users: BaselineOverrideSchema.optional(),
       latency_ms: BaselineOverrideSchema.optional(),
       cf_bytes: BaselineOverrideSchema.optional(),
+      cf_bot_requests: BaselineOverrideSchema.optional(),
     })
     .default({}),
 
@@ -82,6 +83,14 @@ const MonitorSchema = z.object({
   threatRatioCrit: z.number().min(0).max(1).default(0.35),
   threatRatioWarn: z.number().min(0).max(1).default(0.15),
   errorRatio: z.number().min(0).max(1).default(0.1),
+
+  // Bot traffic. Off by default: the bot-score dimensions need Bot Analytics /
+  // Bot Management on the zone, and asking for them on a plan that lacks them
+  // gets the whole GraphQL document rejected. Opting in issues a SECOND,
+  // separate request so that rejection can never take the core metrics with it.
+  botAnalytics: z.boolean().default(false),
+  botShareWarn: z.number().min(0).max(1).default(0.6),
+  botShareCrit: z.number().min(0).max(1).default(0.85),
 
   // Source identifiers — optional until Stage 4 collectors ship.
   cloudflareZoneId: z.string().optional(),

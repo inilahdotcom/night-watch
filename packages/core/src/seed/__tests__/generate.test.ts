@@ -35,9 +35,9 @@ describe("generateSeries — output shape", () => {
   const rows = generateSeries(BASE_OPTS);
   const expectedBuckets =
     (BASE_OPTS.endTs - BASE_OPTS.startTs) / BASE_OPTS.bucketSeconds;
-  const expectedMetricsPerBucket = 9; // 7 cf + 2 ga
+  const expectedMetricsPerBucket = 12; // 10 cf + 2 ga
 
-  it("emits (endTs - startTs) / bucket rows × 9 metrics", () => {
+  it("emits (endTs - startTs) / bucket rows × 12 metrics", () => {
     expect(rows).toHaveLength(expectedBuckets * expectedMetricsPerBucket);
   });
 
@@ -50,7 +50,7 @@ describe("generateSeries — output shape", () => {
     expect(requestsRows).toHaveLength(expectedBuckets);
   });
 
-  it("has all 9 metrics for every bucket", () => {
+  it("has all 12 metrics for every bucket", () => {
     const buckets = new Map<number, Set<string>>();
     for (const r of rows) {
       if (!buckets.has(r.bucketTs)) buckets.set(r.bucketTs, new Set());

@@ -5,8 +5,10 @@ export {
 } from "./probe.ts";
 
 export {
+  CLOUDFLARE_BOT_QUERY,
   CLOUDFLARE_QUERY,
   collectCloudflare,
+  collectCloudflareBots,
   parseBucketTs,
   type CloudflareCollectorOptions,
   type CloudflareCollectorResult,

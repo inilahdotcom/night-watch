@@ -14,8 +14,12 @@
       "forbidText": ["slot gacor", "judi online"],
       "baselines": {
         "ga_active_users": { "direction": "drop", "severity": "critical" },
-        "latency_ms": { "direction": "spike" }
+        "latency_ms": { "direction": "spike" },
+        "cf_bot_requests": { "direction": "spike" }
       },
+      "botAnalytics": false,
+      "botShareWarn": 0.6,
+      "botShareCrit": 0.85,
       "cloudflareZoneId": "REPLACE_WITH_ZONE_ID",
       "ga4PropertyId": "REPLACE_WITH_PROPERTY_ID"
     }

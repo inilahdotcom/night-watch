@@ -17,6 +17,9 @@ export type MetricName =
   | "cf_status_4xx"
   | "cf_status_429"
   | "cf_cache_miss"
+  | "cf_bot_requests"
+  | "cf_human_requests"
+  | "cf_verified_bot_requests"
   | "ga_active_users"
   | "ga_page_views"
   | "latency_ms"
@@ -32,6 +35,9 @@ export const METRIC_NAMES = [
   "cf_status_4xx",
   "cf_status_429",
   "cf_cache_miss",
+  "cf_bot_requests",
+  "cf_human_requests",
+  "cf_verified_bot_requests",
   "ga_active_users",
   "ga_page_views",
   "latency_ms",
@@ -47,6 +53,7 @@ export type AlertType =
   | "traffic"
   | "uptime"
   | "ddos"
+  | "bot"
   | "latency"
   | "cert"
   | "content";

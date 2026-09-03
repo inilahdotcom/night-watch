@@ -1,5 +1,6 @@
 export {
   getActiveAlerts,
+  getBotSeries,
   getActiveSnoozes,
   getAlertHistory,
   getMonitors,
@@ -12,6 +13,8 @@ export {
   getUptime,
   getWhatsAppQr,
   type ActiveAlertView,
+  type BotSeriesPoint,
+  type BotSeriesView,
   type DeliveryView,
   type HistoryEntryView,
   type MonitorIdentityInput,

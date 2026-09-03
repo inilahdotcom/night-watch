@@ -58,6 +58,9 @@ function baseMonitor(overrides: Partial<Monitor> = {}): Monitor {
     threatRatioCrit: 0.35,
     threatRatioWarn: 0.15,
     errorRatio: 0.1,
+    botAnalytics: false,
+    botShareWarn: 0.6,
+    botShareCrit: 0.85,
     maintenanceWindows: [],
     ...overrides,
   };

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
+  CLOUDFLARE_QUERY,
   collectCloudflare,
+  collectCloudflareBots,
   parseBucketTs,
   type MetricRow,
 } from "../cloudflare.ts";
@@ -319,5 +321,117 @@ describe("collectCloudflare — request shape", () => {
     expect(body.variables.zoneTag).toBe("zone-x");
     expect(body.query).toContain("httpRequestsAdaptiveGroups");
     expect(body.query).toContain("firewallEventsAdaptiveGroups");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bot scoring — a SECOND document, deliberately kept out of the main one.
+// ---------------------------------------------------------------------------
+
+function botGroup(
+  iso: string,
+  botScore: number,
+  count: number,
+  botScoreSrc = "Heuristics",
+  sampleInterval = 1,
+) {
+  return {
+    count,
+    avg: { sampleInterval },
+    dimensions: { datetimeFiveMinutes: iso, botScore, botScoreSrc },
+  };
+}
+
+function botPayload(groups: unknown[]) {
+  return { data: { viewer: { zones: [{ bots: groups }] } } };
+}
+
+describe("collectCloudflareBots — score fold", () => {
+  it("splits scores into bot / human and ignores score 0", async () => {
+    const r = await collectCloudflareBots(
+      callOpts(
+        fakeFetch(
+          botPayload([
+            botGroup(BUCKET_ISO_A, 5, 10),
+            botGroup(BUCKET_ISO_A, 20, 30),
+            botGroup(BUCKET_ISO_A, 45, 100),
+            botGroup(BUCKET_ISO_A, 90, 200),
+            // "Not Computed" — belongs in neither bucket.
+            botGroup(BUCKET_ISO_A, 0, 5000, "Not Computed"),
+          ]),
+        ),
+      ),
+    );
+    expect(metricsFor(r.metrics, "cf_bot_requests")[0]!.value).toBe(40);
+    expect(metricsFor(r.metrics, "cf_human_requests")[0]!.value).toBe(300);
+    expect(metricsFor(r.metrics, "cf_verified_bot_requests")[0]!.value).toBe(0);
+  });
+
+  it("routes verified bots away from cf_bot_requests despite a low score", async () => {
+    const r = await collectCloudflareBots(
+      callOpts(
+        fakeFetch(
+          botPayload([
+            botGroup(BUCKET_ISO_A, 3, 500, "Verified Bot"),
+            botGroup(BUCKET_ISO_A, 10, 25),
+          ]),
+        ),
+      ),
+    );
+    expect(metricsFor(r.metrics, "cf_verified_bot_requests")[0]!.value).toBe(500);
+    expect(metricsFor(r.metrics, "cf_bot_requests")[0]!.value).toBe(25);
+  });
+
+  it("emits all three metrics per bucket, zeros included", async () => {
+    const r = await collectCloudflareBots(
+      callOpts(
+        fakeFetch(
+          botPayload([
+            botGroup(BUCKET_ISO_A, 90, 10),
+            botGroup(BUCKET_ISO_B, 90, 20),
+          ]),
+        ),
+      ),
+    );
+    expect(r.metrics).toHaveLength(6);
+    expect(metricsFor(r.metrics, "cf_bot_requests").map((m) => m.value)).toEqual([
+      0, 0,
+    ]);
+  });
+
+  it("multiplies count by sampleInterval", async () => {
+    const r = await collectCloudflareBots(
+      callOpts(
+        fakeFetch(botPayload([botGroup(BUCKET_ISO_A, 5, 10, "Heuristics", 10)])),
+      ),
+    );
+    expect(metricsFor(r.metrics, "cf_bot_requests")[0]!.value).toBe(100);
+    expect(r.maxSampleInterval).toBe(10);
+  });
+});
+
+describe("collectCloudflareBots — graceful degradation", () => {
+  it("returns zero rows and one error when the zone rejects botScore", async () => {
+    const r = await collectCloudflareBots(
+      callOpts(
+        fakeFetch({
+          errors: [
+            {
+              message: "Unknown field botScore",
+              extensions: { code: "validation" },
+            },
+          ],
+        }),
+      ),
+    );
+    expect(r.metrics).toHaveLength(0);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]!.code).toBe("validation");
+  });
+
+  it("keeps the bot dimensions out of the main document", () => {
+    // Merging the two documents would let a plan-rejection take cf_requests,
+    // cf_threats and every cf_status_* down with it.
+    expect(CLOUDFLARE_QUERY).not.toContain("botScore");
   });
 });

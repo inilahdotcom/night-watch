@@ -2,7 +2,7 @@ import { loadEnv, loadMonitors, type Monitor } from "../config/index.ts";
 import { openDb } from "../db/client.ts";
 import { metrics as metricsTable } from "../db/schema.ts";
 import { createLogger } from "../logger.ts";
-import { collectCloudflare } from "./cloudflare.ts";
+import { collectCloudflare, collectCloudflareBots } from "./cloudflare.ts";
 import { collectGA4 } from "./ga4.ts";
 import { checkControl, probe } from "./probe.ts";
 import { checkTls, tlsTargetFor } from "./tls.ts";
@@ -33,6 +33,7 @@ export interface MonitorReport {
   content?: { bodyBytes: number; forbidHits: number };
   tls?: { daysLeft: number | null; skipped: boolean; reason: string | null };
   cloudflare?: { rowCount: number; errors: number; maxSampleInterval: number };
+  bots?: { rowCount: number; errors: number };
   ga4?: { rowCount: number; errors: number };
   totalRowsWritten: number;
   fatal?: string;
@@ -260,6 +261,27 @@ export async function collectOne(monitor: Monitor, controlUrl: string): Promise<
       for (const err of cf.errors) {
         log.error({ monitor: monitor.id, ...err }, "cloudflare error");
       }
+
+      // Separate request, separate failure. A zone without Bot Analytics gets
+      // its bot document rejected at validation; the core metrics above are
+      // already collected and unaffected.
+      if (monitor.botAnalytics) {
+        const bots = await collectCloudflareBots({
+          zoneId: monitor.cloudflareZoneId,
+          apiToken: env.CLOUDFLARE_API_TOKEN,
+          monitor: monitor.id,
+          sinceTs,
+          untilTs,
+        });
+        rows.push(...bots.metrics);
+        report.bots = {
+          rowCount: bots.metrics.length,
+          errors: bots.errors.length,
+        };
+        for (const err of bots.errors) {
+          log.error({ monitor: monitor.id, ...err }, "cloudflare bot error");
+        }
+      }
     }
   }
 
@@ -358,6 +380,9 @@ async function main(): Promise<void> {
       console.log(
         `  cloudflare: rows=${r.cloudflare.rowCount}  errors=${r.cloudflare.errors}  sampleInterval≤${r.cloudflare.maxSampleInterval}`,
       );
+    }
+    if (r.bots) {
+      console.log(`  bots:       rows=${r.bots.rowCount}  errors=${r.bots.errors}`);
     }
     if (r.ga4) {
       console.log(`  ga4:        rows=${r.ga4.rowCount}  errors=${r.ga4.errors}`);

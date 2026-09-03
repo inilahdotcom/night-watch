@@ -92,15 +92,44 @@ query NightWatchCollector($zoneTag: String!, $since: Time!, $until: Time!) {
 }
 `;
 
-interface GraphQLResponse {
+// Bot scoring lives in a SECOND document on purpose. GraphQL rejects the ENTIRE
+// document at validation when a field is absent on the zone's plan, so folding
+// this in as a fifth alias would take cf_requests, cf_bytes, cf_threats,
+// cf_status_* and cf_cache_miss down with it on every non-Bot-Management zone.
+// One extra round trip, only for monitors that opted in, contains the failure
+// to three metric names nothing else reads.
+export const CLOUDFLARE_BOT_QUERY = `
+query NightWatchBots($zoneTag: String!, $since: Time!, $until: Time!) {
+  viewer {
+    zones(filter: { zoneTag: $zoneTag }) {
+      bots: httpRequestsAdaptiveGroups(
+        limit: 10000,
+        filter: { datetime_geq: $since, datetime_lt: $until }
+      ) {
+        count
+        avg { sampleInterval }
+        dimensions { datetimeFiveMinutes, botScore, botScoreSrc }
+      }
+    }
+  }
+}
+`;
+
+interface MainZone {
+  total?: Array<TotalGroup>;
+  byStatus?: Array<StatusGroup>;
+  byCache?: Array<CacheGroup>;
+  firewall?: Array<FirewallGroup>;
+}
+
+interface BotZone {
+  bots?: Array<BotGroup>;
+}
+
+interface GraphQLResponse<TZone> {
   data?: {
     viewer?: {
-      zones?: Array<{
-        total?: Array<TotalGroup>;
-        byStatus?: Array<StatusGroup>;
-        byCache?: Array<CacheGroup>;
-        firewall?: Array<FirewallGroup>;
-      }>;
+      zones?: Array<TZone>;
     };
   };
   errors?: Array<{
@@ -143,6 +172,16 @@ interface FirewallGroup {
   };
 }
 
+interface BotGroup {
+  count: number;
+  avg?: { sampleInterval?: number };
+  dimensions?: {
+    datetimeFiveMinutes?: string;
+    botScore?: number;
+    botScoreSrc?: string;
+  };
+}
+
 /** Round an ISO timestamp (Cloudflare's 5-min bucket dim) to unix seconds. */
 export function parseBucketTs(iso: string | undefined): number | null {
   if (!iso) return null;
@@ -164,17 +203,17 @@ const THREAT_ACTIONS = new Set([
 // Cache statuses that count as "miss" for our cf_cache_miss metric.
 const CACHE_MISS_STATES = new Set(["miss", "expired", "bypass", "dynamic"]);
 
-export async function collectCloudflare(
+// Shared transport for both documents below. Returns the first zone plus any
+// structured errors; never throws, so one bad monitor cannot kill a poll cycle.
+async function postGraphQL<TZone>(
   opts: CloudflareCollectorOptions,
-): Promise<CloudflareCollectorResult> {
+  query: string,
+): Promise<{ zone: TZone | null; errors: CollectorError[] }> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const endpoint = opts.endpoint ?? DEFAULT_ENDPOINT;
-  const errors: CollectorError[] = [];
-  const metrics: MetricRow[] = [];
-  let maxSampleInterval = 1;
 
   const body = {
-    query: CLOUDFLARE_QUERY,
+    query,
     variables: {
       zoneTag: opts.zoneId,
       since: new Date(opts.sinceTs * 1000).toISOString(),
@@ -194,53 +233,55 @@ export async function collectCloudflare(
     });
   } catch (err) {
     return {
-      metrics,
+      zone: null,
       errors: [
-        {
-          code: "TRANSPORT",
-          message: (err as Error).message ?? String(err),
-        },
+        { code: "TRANSPORT", message: (err as Error).message ?? String(err) },
       ],
-      maxSampleInterval,
     };
   }
 
   if (!response.ok) {
     const text = await response.text().catch(() => "");
     return {
-      metrics,
+      zone: null,
       errors: [
         {
           code: `HTTP_${response.status}`,
           message: text || response.statusText,
         },
       ],
-      maxSampleInterval,
     };
   }
 
   const json = (await response.json().catch(() => null)) as
-    | GraphQLResponse
+    | GraphQLResponse<TZone>
     | null;
   if (!json) {
     return {
-      metrics,
+      zone: null,
       errors: [{ code: "BAD_JSON", message: "response was not JSON" }],
-      maxSampleInterval,
     };
   }
 
-  if (json.errors && json.errors.length > 0) {
-    for (const e of json.errors) {
-      errors.push({
-        code: e.extensions?.code ?? "GRAPHQL",
-        message: e.message,
-        path: e.path,
-      });
-    }
+  const errors: CollectorError[] = [];
+  for (const e of json.errors ?? []) {
+    errors.push({
+      code: e.extensions?.code ?? "GRAPHQL",
+      message: e.message,
+      path: e.path,
+    });
   }
 
-  const zone = json.data?.viewer?.zones?.[0];
+  return { zone: json.data?.viewer?.zones?.[0] ?? null, errors };
+}
+
+export async function collectCloudflare(
+  opts: CloudflareCollectorOptions,
+): Promise<CloudflareCollectorResult> {
+  const metrics: MetricRow[] = [];
+  let maxSampleInterval = 1;
+
+  const { zone, errors } = await postGraphQL<MainZone>(opts, CLOUDFLARE_QUERY);
   if (!zone) {
     return { metrics, errors, maxSampleInterval };
   }
@@ -332,6 +373,72 @@ export async function collectCloudflare(
   }
   for (const [bucketTs, sum] of threatsByBucket) {
     push("cf_threats", bucketTs, sum);
+  }
+
+  return { metrics, errors, maxSampleInterval };
+}
+
+// Cloudflare bot score: 1 = definitely automated, 99 = definitely human, and 0
+// means "Not Computed" — which belongs in NEITHER bucket. Counting unscored
+// traffic as human inflates the denominator and silences the detector; counting
+// it as bot fires on every Cloudflare-handled path.
+//
+// ponytail: bot/human split hard-coded at 29, Cloudflare's own "likely
+// automated" line. Promote to a per-monitor config field only if a zone needs a
+// different split.
+const BOT_SCORE_MAX = 29;
+const VERIFIED_BOT_SRC = "Verified Bot";
+
+export async function collectCloudflareBots(
+  opts: CloudflareCollectorOptions,
+): Promise<CloudflareCollectorResult> {
+  const metrics: MetricRow[] = [];
+  let maxSampleInterval = 1;
+
+  const { zone, errors } = await postGraphQL<BotZone>(
+    opts,
+    CLOUDFLARE_BOT_QUERY,
+  );
+  if (!zone) {
+    return { metrics, errors, maxSampleInterval };
+  }
+
+  const byBucket = new Map<
+    number,
+    { bot: number; human: number; verified: number }
+  >();
+
+  for (const g of zone.bots ?? []) {
+    const bucketTs = parseBucketTs(g.dimensions?.datetimeFiveMinutes);
+    const score = g.dimensions?.botScore;
+    if (bucketTs === null || typeof score !== "number") continue;
+
+    const sampleInterval = g.avg?.sampleInterval ?? 1;
+    maxSampleInterval = Math.max(maxSampleInterval, sampleInterval);
+    const trueCount = g.count * sampleInterval;
+
+    let b = byBucket.get(bucketTs);
+    if (!b) {
+      b = { bot: 0, human: 0, verified: 0 };
+      byBucket.set(bucketTs, b);
+    }
+
+    // botScoreSrc wins over the score: a verified Googlebot scores low and is
+    // not the threat.
+    if (g.dimensions?.botScoreSrc === VERIFIED_BOT_SRC) b.verified += trueCount;
+    else if (score >= 1 && score <= BOT_SCORE_MAX) b.bot += trueCount;
+    else if (score > BOT_SCORE_MAX) b.human += trueCount;
+  }
+
+  // Every bucket gets all three rows, zeros included. A missing cf_bot_requests
+  // row silently deletes the detector's denominator and draws a fake gap in the
+  // chart.
+  for (const [bucketTs, b] of byBucket) {
+    metrics.push(
+      { monitor: opts.monitor, source: "cloudflare", metric: "cf_bot_requests", bucketTs, value: b.bot },
+      { monitor: opts.monitor, source: "cloudflare", metric: "cf_human_requests", bucketTs, value: b.human },
+      { monitor: opts.monitor, source: "cloudflare", metric: "cf_verified_bot_requests", bucketTs, value: b.verified },
+    );
   }
 
   return { metrics, errors, maxSampleInterval };

@@ -344,6 +344,79 @@ export function getSeries(
 }
 
 // --------------------------------------------------------------------------
+// Bot traffic — one query, three aligned series
+// --------------------------------------------------------------------------
+//
+// Folded server-side rather than shipping three independent SeriesPoint[] to
+// the browser: the three still have to be bucket-joined before they can be
+// drawn as aligned lines, and a bucket present in one series but absent in
+// another silently misaligns the x-axis if that join happens in the component.
+
+export interface BotSeriesPoint {
+  bucketTs: number;
+  bot: number;
+  human: number;
+  verified: number;
+}
+
+export interface BotSeriesView {
+  monitor: string;
+  windowHours: number;
+  points: BotSeriesPoint[];
+  /** False when the zone has no Bot Analytics — the page says so in words. */
+  hasData: boolean;
+}
+
+const BOT_METRICS = [
+  "cf_bot_requests",
+  "cf_human_requests",
+  "cf_verified_bot_requests",
+] as const satisfies readonly MetricName[];
+
+export function getBotSeries(
+  db: DB,
+  args: { monitor: string; hours: number },
+): BotSeriesView {
+  const cutoff = Math.floor(Date.now() / 1000) - args.hours * 3600;
+  const rows = db
+    .select({
+      metric: metrics.metric,
+      bucketTs: metrics.bucketTs,
+      value: metrics.value,
+    })
+    .from(metrics)
+    .where(
+      and(
+        eq(metrics.monitor, args.monitor),
+        eq(metrics.source, "cloudflare"),
+        inArray(metrics.metric, [...BOT_METRICS]),
+        gte(metrics.bucketTs, cutoff),
+      ),
+    )
+    .all();
+
+  const byBucket = new Map<number, BotSeriesPoint>();
+  for (const r of rows) {
+    let p = byBucket.get(r.bucketTs);
+    if (!p) {
+      p = { bucketTs: r.bucketTs, bot: 0, human: 0, verified: 0 };
+      byBucket.set(r.bucketTs, p);
+    }
+    if (r.metric === "cf_bot_requests") p.bot = r.value;
+    else if (r.metric === "cf_human_requests") p.human = r.value;
+    else p.verified = r.value;
+  }
+
+  const points = [...byBucket.values()].sort((a, b) => a.bucketTs - b.bucketTs);
+  return {
+    monitor: args.monitor,
+    windowHours: args.hours,
+    points,
+    hasData: points.length > 0,
+  };
+}
+
+// --------------------------------------------------------------------------
 // Pulse — the chart data, scored with the detector's own definition
 // --------------------------------------------------------------------------
 //

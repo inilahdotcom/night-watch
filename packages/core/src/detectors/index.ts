@@ -41,6 +41,14 @@ export {
 } from "./ddos.ts";
 
 export {
+  evaluateBotShare,
+  type BotDetectorOptions,
+  type BotInput,
+  type BotResult,
+  type BotSeverity,
+} from "./bot.ts";
+
+export {
   evaluateCert,
   type CertDetectorOptions,
   type CertResult,

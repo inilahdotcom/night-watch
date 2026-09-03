@@ -4,6 +4,7 @@ import {
   getActiveAlerts,
   getActiveSnoozes,
   getAlertHistory,
+  getBotSeries,
   getMonitors,
   getPulse,
   getPushHealth,
@@ -18,7 +19,7 @@ import {
   subscribePush,
   unsubscribePush,
 } from "@night-watch/core/web";
-import { openDb, loadEnv, loadMonitors } from "@night-watch/core";
+import { openDb, loadEnv, loadMonitors, METRIC_NAMES } from "@night-watch/core";
 import { authMiddleware } from "./auth";
 
 // Server functions the dashboard calls. All reads go through queries.ts,
@@ -56,19 +57,9 @@ export const fetchAlertHistory = createServerFn({ method: "GET", strict: { outpu
 const SeriesInput = z.object({
   monitor: z.string().min(1),
   source: z.enum(["cloudflare", "ga4", "probe", "internal"]),
-  metric: z.enum([
-    "cf_requests",
-    "cf_bytes",
-    "cf_threats",
-    "cf_status_5xx",
-    "cf_status_4xx",
-    "cf_status_429",
-    "cf_cache_miss",
-    "ga_active_users",
-    "ga_page_views",
-    "latency_ms",
-    "up",
-  ]),
+  // Derived from the single source of truth rather than re-listed here: the
+  // hand-copied version had already drifted two names behind schema.ts.
+  metric: z.enum(METRIC_NAMES),
   hours: z.number().int().positive().max(168).default(6),
 });
 
@@ -78,6 +69,20 @@ export const fetchSeries = createServerFn({ method: "GET", strict: { output: fal
   .handler(async ({ data }) => {
     const { db } = openDb();
     return getSeries(db, data);
+  });
+
+/** Bot / human / verified-bot request volume for one monitor's detail page. */
+export const fetchBotSeries = createServerFn({ method: "GET", strict: { output: false } })
+  .middleware([authMiddleware])
+  .validator(
+    z.object({
+      monitor: z.string().min(1),
+      hours: z.number().int().positive().max(168).default(24),
+    }),
+  )
+  .handler(async ({ data }) => {
+    const { db } = openDb();
+    return getBotSeries(db, data);
   });
 
 export const fetchMonitors = createServerFn({ method: "GET", strict: { output: false } })

@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import type {
   MonitorSummaryView,
@@ -53,7 +54,15 @@ export function MonitorCard({ monitor }: Props) {
       {/* 1 — identity + status */}
       <header className="flex items-start justify-between gap-4">
         <div className="min-w-0">
-          <h3 className="truncate text-xl">{monitor.label ?? monitor.id}</h3>
+          <h3 className="truncate text-xl">
+            <Link
+              to="/monitors/$id"
+              params={{ id: monitor.id }}
+              className="hover:text-accent"
+            >
+              {monitor.label ?? monitor.id}
+            </Link>
+          </h3>
           {/* Only when it adds something. Repeating the slug under the slug is noise. */}
           {monitor.url && (
             <p className="mono mt-1 truncate text-xs text-muted-foreground">

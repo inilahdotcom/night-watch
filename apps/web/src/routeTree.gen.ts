@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LandingRouteImport } from './routes/landing'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as MonitorsIdRouteImport } from './routes/monitors.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -28,35 +29,44 @@ const LoginRoute = LoginRouteImport.update({
   path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MonitorsIdRoute = MonitorsIdRouteImport.update({
+  id: '/monitors/$id',
+  path: '/monitors/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/landing': typeof LandingRoute
   '/login': typeof LoginRoute
+  '/monitors/$id': typeof MonitorsIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/landing': typeof LandingRoute
   '/login': typeof LoginRoute
+  '/monitors/$id': typeof MonitorsIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/landing': typeof LandingRoute
   '/login': typeof LoginRoute
+  '/monitors/$id': typeof MonitorsIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/landing' | '/login'
+  fullPaths: '/' | '/landing' | '/login' | '/monitors/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/landing' | '/login'
-  id: '__root__' | '/' | '/landing' | '/login'
+  to: '/' | '/landing' | '/login' | '/monitors/$id'
+  id: '__root__' | '/' | '/landing' | '/login' | '/monitors/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LandingRoute: typeof LandingRoute
   LoginRoute: typeof LoginRoute
+  MonitorsIdRoute: typeof MonitorsIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -82,6 +92,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/monitors/$id': {
+      id: '/monitors/$id'
+      path: '/monitors/$id'
+      fullPath: '/monitors/$id'
+      preLoaderRoute: typeof MonitorsIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -89,6 +106,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LandingRoute: LandingRoute,
   LoginRoute: LoginRoute,
+  MonitorsIdRoute: MonitorsIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

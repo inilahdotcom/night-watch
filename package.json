@@ -10,7 +10,7 @@
     "dev:web": "cd apps/web && bun run dev",
     "dev:worker": "cd apps/worker && bun run dev",
     "typecheck": "cd packages/core && bun run typecheck && cd ../../apps/worker && bun run typecheck && cd ../web && bun run typecheck",
-    "test": "cd packages/core && bun run test",
+    "test": "cd packages/core && bun run test && cd ../../apps/web && bun test",
     "db:generate": "cd packages/core && bun run db:generate",
     "db:migrate": "cd packages/core && bun run db:migrate",
     "db:seed": "cd packages/core && bun run db:seed",

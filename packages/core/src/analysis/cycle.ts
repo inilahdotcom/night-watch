@@ -4,6 +4,7 @@ import type { Monitor } from "../config/monitors.ts";
 import type { MetricName } from "../db/schema.ts";
 import {
   confirmConsecutive,
+  evaluateBotShare,
   evaluateCert,
   evaluateContent,
   evaluateDDoS,
@@ -41,6 +42,7 @@ const METRIC_LABELS: Partial<Record<MetricName, string>> = {
   ga_page_views: "page views",
   latency_ms: "latency",
   cf_bytes: "bandwidth",
+  cf_bot_requests: "bot requests",
 };
 
 function round2(n: number): number {
@@ -59,6 +61,9 @@ interface CurrentSnapshot {
   status5xx: number;
   status429: number;
   cacheMiss: number;
+  botRequests: number;
+  humanRequests: number;
+  verifiedBotRequests: number;
 }
 
 interface ProbeStateRow {
@@ -75,6 +80,8 @@ interface ProbeStateRow {
 export interface MonitorAnalysisState {
   recentTraffic: TrafficAnomaly[];
   cleanDDoSStreak: number;
+  /** Optional so a worker restarting on pre-upgrade JSON does not throw. */
+  cleanBotStreak?: number;
   cleanSlowStreak: number;
   /**
    * Consecutive-bucket history for the extra baselined metrics, keyed by
@@ -210,6 +217,9 @@ function loadCurrentSnapshot(
     status5xx: byMetric.get("cf_status_5xx") ?? 0,
     status429: byMetric.get("cf_status_429") ?? 0,
     cacheMiss: byMetric.get("cf_cache_miss") ?? 0,
+    botRequests: byMetric.get("cf_bot_requests") ?? 0,
+    humanRequests: byMetric.get("cf_human_requests") ?? 0,
+    verifiedBotRequests: byMetric.get("cf_verified_bot_requests") ?? 0,
   };
 }
 
@@ -513,7 +523,12 @@ export async function runAnalysisCycle(
       const outcome = await engine.raiseAlert({
         fingerprint: fp,
         monitor: monitor.id,
-        type: metric === "latency_ms" ? "latency" : "traffic",
+        type:
+          metric === "latency_ms"
+            ? "latency"
+            : metric === "cf_bot_requests"
+              ? "bot"
+              : "traffic",
         severity: override.severity,
         title: `${monitor.id} ${METRIC_LABELS[metric] ?? metric} ${result.direction}`,
         body: `${METRIC_LABELS[metric] ?? metric}=${round2(currentRow.value)}, baseline median=${round2(result.median)}, z=${result.z.toFixed(2)}, Δrel=${(result.relativeChange * 100).toFixed(1)}%.`,
@@ -655,6 +670,53 @@ export async function runAnalysisCycle(
       });
       if (outcome.action !== "not-found") {
         report.actions.push({ fingerprint: ddosFp, action: outcome.action });
+      }
+    }
+  }
+
+  // ----- bot share ------------------------------------------------------
+  // ponytail: 3-clean-bucket recovery copied from DDoS rather than shared.
+  // Two copies is not a pattern; extract on the third.
+  if (monitor.botAnalytics) {
+    const bot = evaluateBotShare(
+      {
+        botRequests: snapshot.botRequests,
+        humanRequests: snapshot.humanRequests,
+        verifiedBotRequests: snapshot.verifiedBotRequests,
+      },
+      {
+        botShareWarn: monitor.botShareWarn,
+        botShareCrit: monitor.botShareCrit,
+        minRequests: monitor.minRequests,
+      },
+    );
+    const botFp = `${monitor.id}:bot`;
+
+    if (bot.severity !== null) {
+      state.cleanBotStreak = 0;
+      const outcome = await engine.raiseAlert({
+        fingerprint: botFp,
+        monitor: monitor.id,
+        type: "bot",
+        severity: bot.severity,
+        title: `${monitor.id} bot traffic surge (${bot.severity})`,
+        body: `${bot.message}.`,
+        meta: { share: bot.share, scored: bot.scored, verified: bot.verified },
+      });
+      report.actions.push({ fingerprint: botFp, action: outcome.action });
+    } else if (!bot.suppressed) {
+      // Only a bucket we could actually judge counts toward recovery. A thin
+      // bucket at 4am is not evidence the scrapers left.
+      state.cleanBotStreak = (state.cleanBotStreak ?? 0) + 1;
+      if (state.cleanBotStreak >= 3) {
+        const outcome = await engine.resolveAlert({
+          fingerprint: botFp,
+          title: `${monitor.id} bot traffic back to normal`,
+          body: `3 consecutive clean buckets. ${bot.message}.`,
+        });
+        if (outcome.action !== "not-found") {
+          report.actions.push({ fingerprint: botFp, action: outcome.action });
+        }
       }
     }
   }

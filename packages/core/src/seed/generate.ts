@@ -27,6 +27,8 @@ export interface GenerateOptions {
     cacheMiss: number; // e.g. 0.10
     bytesPerRequest: number; // e.g. 12_000 bytes
     gaFraction: number; // e.g. 0.3 (unique users ~ 30% of requests)
+    bot: number; // e.g. 0.35 (scored traffic that is unverified-automated)
+    verifiedBot: number; // e.g. 0.05 (Googlebot and friends)
   };
 }
 
@@ -45,6 +47,8 @@ const DEFAULT_RATIOS: Required<GenerateOptions>["ratios"] = {
   cacheMiss: 0.1,
   bytesPerRequest: 12_000,
   gaFraction: 0.3,
+  bot: 0.35,
+  verifiedBot: 0.05,
 };
 
 const NOISE_STDDEV = 0.08; // multiplicative noise, 8% stddev
@@ -77,6 +81,7 @@ export function generateSeries(opts: GenerateOptions): MetricRow[] {
     let errorRatio = ratios.error5xx;
     let rateLimitRatio = ratios.rateLimit429;
     let cacheMissRatio = ratios.cacheMiss;
+    let botRatio = ratios.bot;
 
     const inj = injectionAt(bucketTs, opts.injections);
     if (inj) {
@@ -91,6 +96,7 @@ export function generateSeries(opts: GenerateOptions): MetricRow[] {
         errorRatio = inj.errorRatio;
         cacheMissRatio = inj.cacheMissRatio;
         rateLimitRatio = Math.max(rateLimitRatio, 0.06); // usually rate-limits kick in
+        botRatio = 0.85; // an attack is overwhelmingly automated
       }
     }
 
@@ -133,6 +139,15 @@ export function generateSeries(opts: GenerateOptions): MetricRow[] {
       Math.round(requests * cacheMissRatio),
       "cloudflare",
     );
+
+    // Bot split. Verified bots are carved out first so bot + human + verified
+    // sums to `requests` — the share detector divides by (bot + human) only.
+    const verified = Math.round(requests * ratios.verifiedBot);
+    const scored = requests - verified;
+    const bots = Math.round(scored * botRatio);
+    push("cf_bot_requests", bots, "cloudflare");
+    push("cf_human_requests", scored - bots, "cloudflare");
+    push("cf_verified_bot_requests", verified, "cloudflare");
 
     push(
       "ga_active_users",
